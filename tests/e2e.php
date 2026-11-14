@@ -411,15 +411,15 @@ $ag13->post("/?p=beneficiary&client=$vc13", ['act' => 'add', 'name' => 'E2E Bene
 ok((int)val("SELECT COUNT(*) FROM beneficiaries WHERE client_id=?", [$vc13]) === 1 && str_contains($ag13->body, 'already saved'), 'the same account cannot be added twice');
 $ag13->post("/?p=beneficiary&client=$oc13", ['act' => 'add', 'name' => 'E2E Sneaky', 'bank' => 'X', 'account' => 'E2E-ACC-9999']);
 ok(!val("SELECT 1 FROM beneficiaries WHERE client_id=?", [$oc13]), "sub-agent cannot add a beneficiary to another agent's client");
-$ag13->post("/?p=beneficiary&client=$vc13&id=" . $eb1['id'], ['act' => 'review', 'decision' => 'approve', 'screening_ref' => 'X', 'verification' => BENEF_VERIFY_METHODS[0], 'notes' => 'Agent trying to approve.']);
+$ag13->post("/?p=beneficiary&client=$vc13&id=" . $eb1['id'], ['act' => 'review', 'rev' => '0', 'decision' => 'approve', 'screening_ref' => 'X', 'verification' => BENEF_VERIFY_METHODS[0], 'notes' => 'Agent trying to approve.']);
 ok(val('SELECT status FROM beneficiaries WHERE id=?', [$eb1['id']]) === 'pending', 'sub-agent cannot approve beneficiaries');
 $ag13->post('/?p=transfer_form', ['client_id' => $vc13, 'transfer_date' => date('Y-m-d'), 'send_amount' => '100', 'send_currency' => 'CAD', 'receive_currency' => 'INR', 'beneficiary_id' => $eb1['id']]);
 ok(!val("SELECT 1 FROM transfers WHERE client_id=?", [$vc13]) && stripos($ag13->body, 'waiting for review') !== false, 'no transfer to a beneficiary that is still waiting for review');
 $co13 = new Browser(); fresh_step_wait(); $co13->login('test.compliance');
 $co13->req('/?p=compliance&v=benef'); ok(str_contains($co13->body, 'E2E Benef One'), 'beneficiary appears in the Compliance Center review list');
-$co13->post("/?p=beneficiary&client=$vc13&id=" . $eb1['id'], ['act' => 'review', 'decision' => 'approve', 'notes' => 'Checked with the client.']);
+$co13->post("/?p=beneficiary&client=$vc13&id=" . $eb1['id'], ['act' => 'review', 'rev' => '0', 'decision' => 'approve', 'notes' => 'Checked with the client.']);
 ok(val('SELECT status FROM beneficiaries WHERE id=?', [$eb1['id']]) === 'pending' && str_contains($co13->body, 'screening'), 'approval without a screening reference is refused');
-$co13->post("/?p=beneficiary&client=$vc13&id=" . $eb1['id'], ['act' => 'review', 'decision' => 'approve', 'screening_ref' => 'E2E-SCR-77', 'verification' => BENEF_VERIFY_METHODS[0], 'notes' => 'Confirmed by phone with the client.']);
+$co13->post("/?p=beneficiary&client=$vc13&id=" . $eb1['id'], ['act' => 'review', 'rev' => '0', 'decision' => 'approve', 'screening_ref' => 'E2E-SCR-77', 'verification' => BENEF_VERIFY_METHODS[0], 'notes' => 'Confirmed by phone with the client.']);
 ok(val('SELECT status FROM beneficiaries WHERE id=?', [$eb1['id']]) === 'active', 'compliance approves the beneficiary');
 snap('beneficiary', $co13->body);
 $ag13->req('/?p=transfer_form&client=' . $vc13); ok(str_contains($ag13->body, 'E2E Benef One') && str_contains($ag13->body, 'name="beneficiary_id"'), 'transfer form offers only approved beneficiaries');
@@ -430,12 +430,35 @@ q("INSERT INTO beneficiaries (client_id, name, status) VALUES (?, 'E2E Foreign B
 $ag13->post('/?p=transfer_form', ['client_id' => $vc13, 'transfer_date' => date('Y-m-d'), 'send_amount' => '100', 'send_currency' => 'CAD', 'receive_currency' => 'INR', 'beneficiary_id' => $foreign]);
 ok((int)val('SELECT COUNT(*) FROM transfers WHERE client_id=?', [$vc13]) === 1, "a beneficiary of another client cannot be used by changing the id");
 $ag13->post("/?p=beneficiary&client=$vc13&id=" . $eb1['id'], ['act' => 'edit', 'name' => 'E2E Benef One', 'relation' => 'Mother', 'country' => 'India', 'bank' => 'HDFC', 'account' => 'E2E-ACC-0002']);
-ok(val('SELECT status FROM beneficiaries WHERE id=?', [$eb1['id']]) === 'pending', 'changing the bank account sends the beneficiary back to review');
+$eb1n = one('SELECT * FROM beneficiaries WHERE replaced_by IS NULL AND client_id=? AND name=? AND id<>?', [$vc13, 'E2E Benef One', $eb1['id']]);
+$eb1o = one('SELECT * FROM beneficiaries WHERE id=?', [$eb1['id']]);
+ok($eb1n && $eb1n['status'] === 'pending' && $eb1o['status'] === 'deactivated' && (int)$eb1o['replaced_by'] === (int)$eb1n['id'] && dec($eb1o['account']) === 'E2E-ACC-0001' && dec($eb1n['account']) === 'E2E-ACC-0002',
+   'changing the bank account makes a new version for review; the approved details stay unchanged');
+$co13->req("/?p=beneficiary&client=$vc13&id=" . $eb1n['id']); $revSeen = preg_match('/name="rev" value="(\d+)"/', $co13->body, $rm) ? $rm[1] : '';
+q('UPDATE beneficiaries SET rev=rev+1 WHERE id=?', [$eb1n['id']]); // the agent changed it again while compliance had the page open
+$co13->post("/?p=beneficiary&client=$vc13&id=" . $eb1n['id'], ['act' => 'review', 'rev' => $revSeen, 'decision' => 'approve', 'screening_ref' => 'E2E-SCR-78', 'verification' => BENEF_VERIFY_METHODS[0], 'notes' => 'Approving the page I saw.']);
+ok($revSeen === '0' && val('SELECT status FROM beneficiaries WHERE id=?', [$eb1n['id']]) === 'pending' && str_contains($co13->body, 'changed while you were reviewing'), 'compliance cannot approve details that changed after the page was opened');
 $sa13 = new Browser(); q("UPDATE users SET role='super_admin' WHERE username='test.admin'"); fresh_step_wait(); $sa13->login('test.admin');
 $sa13->post('/?p=transfers', ['id' => $tr13['id'], 'act' => 'accept']);
 ok(val('SELECT status FROM transfers WHERE id=?', [$tr13['id']]) === 'pending', 'a pending transfer cannot be accepted after its beneficiary changed (re-checked at acceptance)');
-$sa13->post("/?p=beneficiary&client=$vc13&id=" . $eb1['id'], ['act' => 'deactivate', 'reason' => 'E2E: client asked to remove']);
-ok(val('SELECT status FROM beneficiaries WHERE id=?', [$eb1['id']]) === 'deactivated' && (int)val('SELECT COUNT(*) FROM beneficiary_events WHERE beneficiary_id=?', [$eb1['id']]) === 4, 'beneficiary deactivated with a reason; full history kept (added, approved, edited, deactivated)');
+$sa13->post("/?p=beneficiary&client=$vc13&id=" . $eb1n['id'], ['act' => 'deactivate', 'reason' => 'E2E: client asked to remove']);
+ok(val('SELECT status FROM beneficiaries WHERE id=?', [$eb1n['id']]) === 'deactivated'
+   && implode(',', array_column(all('SELECT action FROM beneficiary_events WHERE beneficiary_id IN (?,?) ORDER BY id', [$eb1['id'], $eb1n['id']]), 'action')) === 'added,approved,added,replaced,edited,deactivated',
+   'beneficiary deactivated with a reason; full history kept for both versions');
+// a request made before beneficiaries were reviewed: the decider links it to an approved beneficiary when accepting
+q("INSERT INTO beneficiaries (client_id, name, bank, status, created_by) VALUES (?, 'E2E Legacy Benef', 'SBI', 'active', NULL)", [$vc13]); $lb13 = (int)db()->lastInsertId();
+q("INSERT INTO transfers (ref_no, client_id, client_name, agent_id, beneficiary, send_amount, send_currency, status, transfer_date, requested_by) VALUES ('E2E-LEGACY-1', ?, 'E2E Sender Verified', ?, 'Legacy text', 50, 'CAD', 'pending', ?, ?)", [$vc13, $a1['id'], today(), $a1['id']]); $lt13 = (int)db()->lastInsertId();
+$sa13->req('/?p=transfers&id=' . $lt13);
+$sa13->post('/?p=transfers', ['id' => $lt13, 'act' => 'accept']);
+$okNo = val('SELECT status FROM transfers WHERE id=?', [$lt13]) === 'pending';
+$sa13->req('/?p=transfers&id=' . $lt13);
+$sa13->post('/?p=transfers', ['id' => $lt13, 'act' => 'accept', 'beneficiary_id' => $lb13]);
+$lt = one('SELECT * FROM transfers WHERE id=?', [$lt13]);
+ok($okNo && $lt['status'] === 'accepted' && (int)$lt['beneficiary_id'] === $lb13, 'an older request without a linked beneficiary is accepted only after an approved beneficiary is chosen');
+q("UPDATE beneficiaries SET status='deactivated' WHERE id=?", [$lb13]);
+$sa13->req('/?p=transfers&id=' . $lt13);
+$sa13->post('/?p=transfers', ['id' => $lt13, 'act' => 'complete', 'receipt_no' => 'E2E-R1']);
+ok(val('SELECT status FROM transfers WHERE id=?', [$lt13]) === 'accepted', 'an accepted transfer cannot be marked paid after its beneficiary was deactivated or changed');
 q("UPDATE users SET role='admin' WHERE username='test.admin'");
 // several beneficiaries at registration
 $pf13 = new Browser(); $pf13->req('/register');

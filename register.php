@@ -95,7 +95,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
     } elseif ($act === 'returning_otp' || $act === 'returning_resend') {
         $pend = $_SESSION['returning_pending'] ?? null;
         if (!$pend || time() - $pend['at'] > 900) { $errors[] = 'Your session ran out. Please confirm your details again.'; $view = 'returning'; }
-        elseif ($act === 'returning_resend') { [, $otpMsg] = otp_send(one('SELECT * FROM clients WHERE id=?', [$pend['id']]), 'returning'); $view = 'returning_otp'; }
+        elseif ($act === 'returning_resend') { $pc = one('SELECT * FROM clients WHERE id=?', [$pend['id']]); if ($pc) [, $otpMsg] = otp_send($pc, 'returning'); else { unset($_SESSION['returning_pending']); $errors[] = 'Please confirm your details again.'; } $view = $pc ? 'returning_otp' : 'returning'; }
         elseif (otp_verify((int)$pend['id'], 'returning', post('code'))) {
             unset($_SESSION['returning_pending']); session_regenerate_id(true);
             $_SESSION['returning'] = ['id' => (int)$pend['id'], 'at' => time()];

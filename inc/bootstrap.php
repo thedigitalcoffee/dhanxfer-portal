@@ -79,7 +79,7 @@ function db(): PDO {
     return $pdo;
 }
 
-const SCHEMA_VERSION = '8';
+const SCHEMA_VERSION = '9';
 /** True when the database is at the version this code expects. */
 function schema_current(): bool {
     try { return (string)db()->query("SELECT v FROM settings WHERE k='schema_version'")->fetchColumn() === SCHEMA_VERSION; } catch (Throwable $e) { return false; }
@@ -127,12 +127,21 @@ function migrate_locked(?string $ver): void {
         ['beneficiaries', 'reviewed_by', 'INT UNSIGNED NULL'], ['beneficiaries', 'reviewed_at', 'DATETIME NULL'],
         ['beneficiaries', 'source', "VARCHAR(12) NULL"], ['beneficiaries', 'created_by', 'INT UNSIGNED NULL'],
         ['beneficiaries', 'created_at', 'DATETIME NULL'], ['beneficiaries', 'updated_at', 'DATETIME NULL'],
-        ['transfers', 'beneficiary_id', 'INT UNSIGNED NULL']);
+        ['transfers', 'beneficiary_id', 'INT UNSIGNED NULL'],
+        // v9: a reviewer decides the exact version they saw; approved details are never overwritten (a change makes a new row)
+        ['beneficiaries', 'rev', 'INT UNSIGNED NOT NULL DEFAULT 0'], ['beneficiaries', 'replaced_by', 'INT UNSIGNED NULL'],
+        ['beneficiaries', 'updated_by', 'INT UNSIGNED NULL']);
     foreach ($cols as [$t, $c, $def]) {
         if ($def === null) continue;
         $has = db()->prepare('SELECT 1 FROM information_schema.COLUMNS WHERE TABLE_SCHEMA=DATABASE() AND TABLE_NAME=? AND COLUMN_NAME=?');
         $has->execute([$t, $c]);
         if (!$has->fetchColumn()) db()->exec("ALTER TABLE `$t` ADD COLUMN `$c` $def");
+    }
+    // v9: indexes for duplicate checks and look-ups (not unique: older data may hold duplicates that a person must sort out)
+    foreach ([['beneficiaries', 'account_hash'], ['transfers', 'beneficiary_id'], ['clients', 'id_number_hash'], ['document_versions', 'number_hash']] as [$t, $c]) {
+        $ix = db()->prepare('SELECT 1 FROM information_schema.STATISTICS WHERE TABLE_SCHEMA=DATABASE() AND TABLE_NAME=? AND COLUMN_NAME=? LIMIT 1');
+        $ix->execute([$t, $c]);
+        if (!$ix->fetchColumn()) db()->exec("ALTER TABLE `$t` ADD INDEX `ix_$c` (`$c`)");
     }
     // v3: roles are free text so new job roles can be added; the first admin becomes super admin
     $type = db()->query("SELECT DATA_TYPE FROM information_schema.COLUMNS WHERE TABLE_SCHEMA=DATABASE() AND TABLE_NAME='users' AND COLUMN_NAME='role'")->fetchColumn();
@@ -323,7 +332,7 @@ const PERMS = [
 const COMPLIANCE_DEFAULTS = [
     'refresh_months_low' => '36', 'refresh_months_medium' => '24', 'refresh_months_high' => '12',
     'block_unverified' => '1', 'block_expired_doc' => '1', 'expired_grace_days' => '0', 'block_rekyc_overdue' => '1',
-    'rekyc_open_days' => '90', 'benef_high_risk_countries' => '', 'benef_max_per_client' => '10', 'escalate_after_days' => '7', 'upload_link_days' => '7', 'reminder_max_attempts' => '3',
+    'rekyc_open_days' => '90', 'benef_high_risk_countries' => '', 'benef_max_per_client' => '10', 'benef_four_eyes' => '1', 'escalate_after_days' => '7', 'upload_link_days' => '7', 'reminder_max_attempts' => '3',
 ];
 const DEFAULT_PERMS = [
     'admin' => ['clients.all', 'clients.edit', 'submissions.review', 'transfers.create', 'transfers.decide', 'rates.set', 'commission.view', 'team.agents', 'log.use', 'export', 'audit.all', 'compliance.view', 'beneficiaries.manage'],

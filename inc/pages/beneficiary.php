@@ -19,14 +19,14 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
         [$id, $errors] = benef_add((int)$c['id'], $form, $isAgent ? 'agent' : 'admin', (int)$u['id']);
         if ($id) { flash('Beneficiary added. It can receive money after review.'); redirect($back); }
     } elseif ($act === 'edit' && $b) {
-        [$ok, $errors] = benef_update($b, $form, (int)$u['id']);
-        if ($ok) { flash('Beneficiary saved.' . (one('SELECT status FROM beneficiaries WHERE id=?', [$b['id']])['status'] === 'pending' && $b['status'] !== 'pending' ? ' The change needs review before the next transfer.' : '')); redirect($back); }
+        [$nid, $errors] = benef_update($b, $form, (int)$u['id']);
+        if ($nid) { flash($nid !== (int)$b['id'] ? 'Saved as a new version. It needs review before the next transfer; the approved details stay in the history.' : 'Beneficiary saved.'); redirect('/?p=beneficiary&client=' . $c['id'] . '&id=' . $nid); }
     } elseif ($act === 'deactivate' && $b) {
         if (trim(post('reason')) === '') $errors[] = 'Give a reason for deactivating.';
         else { benef_deactivate($b, mb_substr(trim(post('reason')), 0, 200), (int)$u['id']); flash('Beneficiary deactivated. It stays in the history.'); redirect($back); }
     } elseif ($act === 'review' && $b) {
         if (!$canReview) { flash('Your role cannot review beneficiaries.', 'bad'); redirect($back); }
-        [$ok, $errors] = benef_review($b, $u, ['decision' => post('decision'), 'screening_ref' => post('screening_ref'), 'verification' => post('verification'), 'notes' => post('notes')]);
+        [$ok, $errors] = benef_review($b, $u, ['decision' => post('decision'), 'screening_ref' => post('screening_ref'), 'verification' => post('verification'), 'notes' => post('notes'), 'rev' => post('rev')]);
         if ($ok) { flash(post('decision') === 'approve' ? 'Beneficiary approved.' : 'Beneficiary rejected.'); redirect($back); }
     }
 }
@@ -43,7 +43,8 @@ page_head($b ? 'Beneficiary · ' . $b['name'] : 'Add beneficiary'); ?>
   <a class="btn" href="<?= e($back) ?>">Back to client</a></div>
 <?php foreach ($errors as $er): ?><div class="banner bad"><?= e($er) ?></div><?php endforeach; ?>
 <div class="grid2"><div>
-<?php if ($canManage && (!$b || $b['status'] !== 'deactivated')): ?>
+<?php if ($b && $b['replaced_by']): ?><div class="banner warn">These details were changed. <a href="/?p=beneficiary&client=<?= (int)$c['id'] ?>&id=<?= (int)$b['replaced_by'] ?>">Open the new version #<?= (int)$b['replaced_by'] ?></a>. This version is kept because transfers may point to it.</div><?php endif; ?>
+<?php if ($canManage && (!$b || in_array($b['status'], ['pending', 'active'], true))): ?>
   <form method="post" class="card"><?= csrf_field() ?><input type="hidden" name="act" value="<?= $b ? 'edit' : 'add' ?>">
     <h3 style="margin-bottom:10px"><?= $b ? 'Details' : 'Who will receive the money?' ?></h3>
     <div class="fields">
@@ -54,24 +55,25 @@ page_head($b ? 'Beneficiary · ' . $b['name'] : 'Add beneficiary'); ?>
       <div class="f"><label for="account">Account number / IBAN<?= $b && $acct !== '' ? ' · on file ' . e($reveal ? $acct : mask($acct)) . ' (leave empty to keep)' : '' ?></label><input id="account" name="account" autocomplete="off" value="<?= e($form['account'] ?? '') ?>"></div>
       <div class="f"><label for="phone">Phone</label><input id="phone" name="phone" type="tel" value="<?= $val('phone') ?>"></div>
     </div>
-    <?php if ($b && $b['status'] === 'active'): ?><p class="tag">Changing the name, country, bank or account sends this beneficiary back to review.</p><?php endif; ?>
+    <?php if ($b && $b['status'] === 'active'): ?><p class="tag">Any change is saved as a new version that waits for review. The approved details stay unchanged for past transfers.</p><?php endif; ?>
     <button class="btn gold"><?= $b ? 'Save changes' : 'Add beneficiary' ?></button>
   </form>
 <?php elseif ($b): ?>
   <div class="card"><dl class="kv"><?= kv('Name', $b['name']) . kv('Relationship', $b['relation']) . kv('Country', $b['country']) . kv('Bank', $b['bank']) . kv('Account', $reveal ? $acct : mask($acct)) . kv('Phone', $b['phone']) ?></dl></div>
 <?php endif; ?>
 <?php if ($b && can('pii.reveal') && !$reveal && $acct !== ''): ?><form method="post" class="inline"><?= csrf_field() ?><button class="linkbtn" name="act" value="reveal">Show full account number</button> <span class="tag">(logged)</span></form><?php endif; ?>
-<?php if ($b && $canManage && $b['status'] !== 'deactivated'): ?>
+<?php if ($b && $canManage && in_array($b['status'], ['pending', 'active'], true)): ?>
   <form method="post" class="card row" style="padding:12px"><?= csrf_field() ?><input type="hidden" name="act" value="deactivate">
     <div class="f" style="flex:1;min-width:200px"><label for="reason">Deactivate: reason</label><input id="reason" name="reason" placeholder="e.g. client no longer sends to this person"></div>
     <button class="btn danger">Deactivate</button></form>
 <?php endif; ?>
 </div><div>
 <?php if ($b && $b['status'] === 'pending' && $canReview): ?>
-  <form method="post" class="card" style="border-color:var(--gold)"><?= csrf_field() ?><input type="hidden" name="act" value="review">
+  <form method="post" class="card" style="border-color:var(--gold)"><?= csrf_field() ?><input type="hidden" name="act" value="review"><input type="hidden" name="rev" value="<?= (int)$b['rev'] ?>">
     <h3 style="margin-bottom:10px">Review</h3>
     <?php foreach ($flags as $f): ?><div class="banner warn" style="margin:0 0 8px"><?= e($f) ?></div><?php endforeach; ?>
     <?php if (!$flags): ?><p class="tag" style="margin-top:0">No automatic flags. Still screen the name.</p><?php endif; ?>
+    <?php if (setting('benef_four_eyes', '1') === '1' && in_array((int)$u['id'], array_map('intval', array_filter([$b['created_by'], $b['updated_by']])), true)): ?><div class="banner warn" style="margin:0 0 8px">You added or changed this beneficiary: another reviewer must decide it.</div><?php endif; ?>
     <div class="fields">
       <div class="f wide"><label for="screening_ref">Sanctions screening reference</label><input id="screening_ref" name="screening_ref" value="<?= e(post('screening_ref')) ?>" placeholder="tool + result ID"></div>
       <div class="f wide"><label for="verification">How were the details verified?</label><select id="verification" name="verification"><?= opts(BENEF_VERIFY_METHODS, post('verification')) ?></select></div>

@@ -24,6 +24,14 @@ function otp_send(array $client, string $purpose, string $channel = 'email'): ar
     $chs = otp_channels($client);
     if (!isset($chs[$channel])) return [false, 'There is no verified ' . ($channel === 'sms' ? 'mobile number' : 'email address') . ' on your file. Please contact DhanXfer on WhatsApp +1 (942)-6600-0600.'];
     if ((int)val('SELECT COUNT(*) FROM client_otps WHERE client_id=? AND created_at > (NOW() - INTERVAL 1 HOUR)', [$client['id']]) >= 3) return [false, 'Too many codes were sent in the last hour. Please wait and try again.'];
+    // longer cap: about 6 codes (30 guesses) a day per client, and staff are told when it is reached
+    if ((int)val('SELECT COUNT(*) FROM client_otps WHERE client_id=? AND created_at > (NOW() - INTERVAL 1 DAY)', [$client['id']]) >= 6) {
+        if (!val("SELECT 1 FROM audit WHERE action='otp_daily_cap' AND entity_id=? AND created_at > (NOW() - INTERVAL 1 DAY) LIMIT 1", [$client['id']])) {
+            audit_write(null, 'otp_daily_cap', 'client', $client['id'], $purpose, client_ip());
+            notify('Security codes paused for a client', 'A client reached the daily limit of security codes. Check the activity log if they did not ask for them.', 'compliance');
+        }
+        return [false, 'Too many codes were sent today. Please contact DhanXfer on WhatsApp +1 (942)-6600-0600.'];
+    }
     q('UPDATE client_otps SET used_at=NOW() WHERE client_id=? AND purpose=? AND used_at IS NULL', [$client['id'], $purpose]);
     $code = str_pad((string)random_int(0, 999999), 6, '0', STR_PAD_LEFT);
     q('INSERT INTO client_otps (client_id, purpose, channel, code_hash, expires_at, ip) VALUES (?,?,?,?,DATE_ADD(NOW(), INTERVAL 10 MINUTE),?)', [$client['id'], $purpose, $channel, otp_hash((int)$client['id'], $purpose, $code), client_ip()]);
@@ -36,7 +44,9 @@ function otp_send(array $client, string $purpose, string $channel = 'email'): ar
 /** Checks a code. 5 wrong tries end the code. */
 function otp_verify(int $clientId, string $purpose, string $code): bool {
     $r = one('SELECT * FROM client_otps WHERE client_id=? AND purpose=? AND used_at IS NULL AND expires_at > NOW() ORDER BY id DESC LIMIT 1', [$clientId, $purpose]);
-    if (!$r || (int)$r['attempts'] >= 5) return false;
+    if (!$r) return false;
+    // count the try first and atomically: parallel guesses cannot go past 5
+    if (q('UPDATE client_otps SET attempts=attempts+1 WHERE id=? AND attempts<5 AND used_at IS NULL', [$r['id']])->rowCount() !== 1) return false;
     $code = preg_replace('/\D/', '', $code);
     if (strlen($code) === 6 && hash_equals($r['code_hash'], otp_hash($clientId, $purpose, $code))) {
         // single use, even if two requests arrive together
@@ -44,7 +54,6 @@ function otp_verify(int $clientId, string $purpose, string $code): bool {
         if ($ok) audit_write(null, 'otp_verified', 'client', $clientId, $purpose, client_ip());
         return $ok;
     }
-    q('UPDATE client_otps SET attempts=attempts+1 WHERE id=?', [$r['id']]);
     return false;
 }
 /** SMS adapter: off until a provider is approved and configured. */

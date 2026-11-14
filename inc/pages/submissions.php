@@ -19,12 +19,19 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && post('act') !== 'reveal') {
         $d = (json_decode((string)dec($s['data']), true) ?: [])['returning_update'] ?? [];
         $c = one('SELECT * FROM clients WHERE id=?', [$s['client_id_returning']]);
         $chg = $d['changes'] ?? [];
+        // one KYC identity per sender: a new ID number that belongs to another client stops the whole update before anything changes
+        if (in_array('id', $chg, true) && trim((string)($d['id_number'] ?? '')) !== '' && id_number_owner((string)$d['id_number'], (int)$c['id'])) {
+            q("UPDATE submissions SET status='new', reviewed_by=NULL, reviewed_at=NULL WHERE id=?", [$s['id']]);
+            flash('The new ID number in this update already belongs to another client record. One identity per sender: reject this update or contact the client.', 'bad');
+            redirect('/?p=submissions&id=' . $s['id']);
+        }
         if (in_array('address', $chg, true) && trim($d['address'] ?? '') !== '') q("UPDATE clients SET address=?, city=?, province=?, postal=?, address_source='manual', updated_at=NOW() WHERE id=?", [$d['address'], $d['city'] ?: null, $d['province'] ?: null, $d['postal'] ?: null, $c['id']]);
         if (in_array('phone', $chg, true) && !empty($d['phone_e164'])) q('UPDATE clients SET phone=?, phone_e164=?, updated_at=NOW() WHERE id=?', [$d['phone'], $d['phone_e164'], $c['id']]);
         if (array_intersect(['address', 'phone'], $chg)) kyc_identity_changed((int)$c['id'], implode(', ', array_intersect(['address', 'phone'], $chg)), (int)$u['id']);
         if (in_array('beneficiary', $chg, true)) foreach ($d['beneficiaries'] ?? [] as $nb) { [, $be] = benef_add((int)$c['id'], $nb, 'online', (int)$u['id']); foreach ($be as $x) flash('Beneficiary not added: ' . $x, 'warn'); }
         if (in_array('id', $chg, true) || in_array('address', $chg, true)) {
-            if (in_array('id', $chg, true)) client_save_document((int)$c['id'], ['id_type' => $d['id_type'] ?? '', 'id_number' => $d['id_number'] ?? '', 'id_expiry' => valid_date($d['id_expiry'] ?? '') ?? '', 'id_country' => $c['id_country']], $s['id_file'], 'online', (int)$u['id']);
+            if (in_array('id', $chg, true)) try { client_save_document((int)$c['id'], ['id_type' => $d['id_type'] ?? '', 'id_number' => $d['id_number'] ?? '', 'id_expiry' => valid_date($d['id_expiry'] ?? '') ?? '', 'id_country' => $c['id_country']], $s['id_file'], 'online', (int)$u['id']); }
+                catch (IdNumberTaken $ex) { flash('The new ID was not saved: ' . $ex->getMessage(), 'bad'); }
             else doc_sync_client((int)$c['id']);
             rekyc_open((int)$c['id'], 'manual', null, date('Y-m-d', strtotime(today() . ' +30 days')), (int)$u['id'], 'update:' . $s['id']);
         }
@@ -38,14 +45,16 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && post('act') !== 'reveal') {
         $v = [];
         foreach (CLIENT_FIELDS as $k) $v[$k] = (string)($d[$k] ?? '');
         foreach (['phone_e164', 'phone_region', 'address_source', 'id_has_address', 'id_addr_same', 'id_addr_line1', 'id_addr_city', 'id_addr_postal'] as $k) $v[$k] = (string)($d[$k] ?? '');
-        if (trim($v['id_number']) !== '' && ($ex = one('SELECT id, client_no FROM clients WHERE id_number_hash=?', [id_hash($v['id_number'])]))) {
+        require_once __DIR__ . '/../kyc.php';
+        if (trim($v['id_number']) !== '' && ($ex = id_number_owner($v['id_number'], 0))) {
             q("UPDATE submissions SET status='new', reviewed_by=NULL, reviewed_at=NULL WHERE id=?", [$s['id']]);
             flash('This ID number already belongs to client ' . $ex['client_no'] . '. One identity per sender: update that client instead, or reject this form.', 'bad');
             redirect('/?p=submissions&id=' . $s['id']);
         }
         $agentId = (int)post('agent_id') ?: null;
         if ($agentId && !val("SELECT 1 FROM users WHERE id=? AND role='agent'", [$agentId])) $agentId = null;
-        $cid = insert_client($v, ['kyc' => 'Pending', 'agent_id' => $agentId, 'source' => 'online', 'consent' => !empty($d['consent']), 'id_file' => $s['id_file'], 'created_by' => $u['id']]);
+        try { $cid = insert_client($v, ['kyc' => 'Pending', 'agent_id' => $agentId, 'source' => 'online', 'consent' => !empty($d['consent']), 'id_file' => $s['id_file'], 'created_by' => $u['id']]); }
+        catch (IdNumberTaken $ex) { q("UPDATE submissions SET status='new', reviewed_by=NULL, reviewed_at=NULL WHERE id=?", [$s['id']]); flash($ex->getMessage(), 'bad'); redirect('/?p=submissions&id=' . $s['id']); }
         foreach (save_beneficiaries($cid, $d['beneficiaries'] ?? [], 'online', (int)$u['id']) as $be) flash('Beneficiary not added: ' . $be, 'warn');
         q("UPDATE submissions SET status='approved', client_id=?, reviewed_by=?, reviewed_at=NOW() WHERE id=?", [$cid, $u['id'], $s['id']]);
         audit('approve_submission', 'client', $cid, (string)$s['app_ref']);

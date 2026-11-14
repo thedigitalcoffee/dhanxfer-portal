@@ -34,12 +34,13 @@ if ($r && $_SERVER['REQUEST_METHOD'] === 'POST') {
         if (!in_array(post('id_type'), ID_TYPES, true)) $err[] = 'Choose the ID type.';
         if (trim(post('id_number')) === '') $err[] = 'Enter the ID number.';
         if (!$exp || $exp <= today()) $err[] = 'Enter the expiry date of a current (not expired) ID.';
+        if (!$err && id_number_owner(mb_substr(trim(post('id_number')), 0, 60), (int)$r['client_id'])) $err[] = 'We could not accept this ID number online. Please contact DhanXfer on WhatsApp +1 (942)-6600-0600.';
         if (!$err && empty($_FILES['id_file']['name'])) $err[] = 'Add a photo or scan of the ID.';
         $file = null;
         if (!$err) { try { $file = save_id_upload('id_file'); } catch (RuntimeException $ex) { $err[] = $ex->getMessage(); } }
         if (!$err && $file) {
             // single use: only the request that marks the link used may save
-            if (q('UPDATE upload_requests SET used_at=NOW() WHERE id=? AND used_at IS NULL', [$r['id']])->rowCount() === 1) {
+            if (q('UPDATE upload_requests SET used_at=NOW() WHERE id=? AND used_at IS NULL', [$r['id']])->rowCount() === 1) try {
                 $has = post('id_has_address') === 'yes' ? true : (post('id_has_address') === 'no' ? false : null);
                 $addr = $has && post('id_addr_same') === 'no' ? ['line1' => mb_substr(post('id_addr_line1'), 0, 160), 'city' => mb_substr(post('id_addr_city'), 0, 100), 'postal' => mb_substr(post('id_addr_postal'), 0, 20), 'country' => mb_substr(post('id_country'), 0, 80)] : null;
                 $vid = doc_add_version((int)$r['client_id'], ['doc_type' => post('id_type'), 'number' => mb_substr(trim(post('id_number')), 0, 60), 'issuing_country' => mb_substr(post('id_country'), 0, 80), 'expires_on' => $exp, 'has_address' => $has, 'address' => $addr, 'file_name' => $file], 'upload_link', null);
@@ -48,6 +49,10 @@ if ($r && $_SERVER['REQUEST_METHOD'] === 'POST') {
                 notify('Client uploaded an updated document', 'A client uploaded a document through a secure link. It is waiting for KYC review in the Compliance Center.', 'compliance');
                 unset($_SESSION['upload_ok'][$r['id']]);
                 $done = true;
+            } catch (IdNumberTaken $ex) {
+                q('UPDATE upload_requests SET used_at=NULL WHERE id=?', [$r['id']]);
+                audit_write(null, 'document_refused', 'client', $r['client_id'], 'ID number already on another client record', client_ip());
+                $err[] = 'We could not accept this ID number online. Please contact DhanXfer on WhatsApp +1 (942)-6600-0600.';
             } else $err[] = 'This link was already used.';
         }
     }

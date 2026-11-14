@@ -41,12 +41,14 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
     }
     // one KYC identity per person: the same ID document cannot belong to two client records
     if (!$errors && trim($nv['id_number']) !== '') {
-        $idDupe = one('SELECT id, client_no, name FROM clients WHERE id_number_hash=? AND id<>?', [id_hash($nv['id_number']), $c['id'] ?? 0]);
-        if ($idDupe) $errors[] = 'This ID number already belongs to another client' . (can_see_client($idDupe) ? ': ' . $idDupe['name'] . ' (' . $idDupe['client_no'] . ')' : '') . '. Every sender needs their own identity: use that client record instead.';
+        require_once __DIR__ . '/../kyc.php';
+        $idDupe = id_number_owner($nv['id_number'], (int)($c['id'] ?? 0));
+        if ($idDupe) $errors[] = can_see_client($idDupe) ? 'This ID number already belongs to another client: ' . $idDupe['name'] . ' (' . $idDupe['client_no'] . '). Every sender needs their own identity: use that client record instead.'
+                                                         : 'This ID number cannot be used for a new client. Contact the office.';
     }
     $file = null;
     if (!$errors) { try { $file = save_id_upload('id_file'); } catch (RuntimeException $ex) { $errors[] = $ex->getMessage(); } }
-    if (!$errors) {
+    if (!$errors) try {
         if ($c) {
             $sets = []; $par = [];
             $idKeys = ['id_type', 'id_number', 'id_country', 'id_expiry'];
@@ -84,7 +86,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
             flash('Client saved as ' . val('SELECT client_no FROM clients WHERE id=?', [$newId]) . '.');
             redirect('/?p=client&id=' . $newId);
         }
-    }
+    } catch (IdNumberTaken $ex) { $errors[] = $ex->getMessage(); }
     $v = array_merge($v, $nv, ['kyc' => $kyc, 'risk' => $risk, 'agent_id' => $agentId, 'consent' => $consent]);
 }
 

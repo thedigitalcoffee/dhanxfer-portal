@@ -37,7 +37,29 @@ function doc_history(int $clientId): array {
  * Adds a new version of the client's identity document (the old versions stay as history).
  * $d: doc_type, number (plain), issuing_country, expires_on, has_address (bool|null), address (array|null), file_name.
  */
+/** Raised when an identity document number already belongs to another client (one KYC identity per sender). */
+class IdNumberTaken extends RuntimeException {}
+/** The client (other than $clientId) that already holds this ID number, now or in its document history. */
+function id_number_owner(string $num, int $clientId): ?array {
+    $h = trim($num) === '' ? null : id_hash(trim($num));
+    if (!$h) return null;
+    return one('SELECT id, client_no, name, agent_id FROM clients WHERE id<>? AND (id_number_hash=? OR id IN (SELECT client_id FROM document_versions WHERE number_hash=?)) ORDER BY id LIMIT 1', [$clientId, $h, $h]);
+}
+/** Runs $fn while holding the ID-number lock, so two saves of the same number at the same moment cannot both pass the check. */
+function with_id_lock(callable $fn) {
+    $l = lock_name('dx_idnum');
+    if ((int)val('SELECT GET_LOCK(?, 15)', [$l]) !== 1) throw new RuntimeException('Another identity is being saved. Try again in a moment.');
+    try { return $fn(); } finally { val('SELECT RELEASE_LOCK(?)', [$l]); }
+}
 function doc_add_version(int $clientId, array $d, string $source, ?int $by, string $kind = 'identity'): int {
+    $num = trim((string)($d['number'] ?? ''));
+    if ($kind === 'identity' && $num !== '') return with_id_lock(function () use ($clientId, $d, $source, $by, $kind, $num) {
+        if (id_number_owner($num, $clientId)) throw new IdNumberTaken('This ID number already belongs to another client record. Every sender needs their own identity.');
+        return doc_add_version_locked($clientId, $d, $source, $by, $kind);
+    });
+    return doc_add_version_locked($clientId, $d, $source, $by, $kind);
+}
+function doc_add_version_locked(int $clientId, array $d, string $source, ?int $by, string $kind): int {
     $doc = one("SELECT * FROM client_documents WHERE client_id=? AND doc_kind=? AND status='current' ORDER BY id DESC LIMIT 1", [$clientId, $kind]);
     if (!$doc) { q('INSERT INTO client_documents (client_id, doc_kind, doc_type) VALUES (?,?,?)', [$clientId, $kind, $d['doc_type'] ?? null]); $docId = (int)db()->lastInsertId(); $ver = 1; }
     else { $docId = (int)$doc['id']; $ver = (int)val('SELECT COALESCE(MAX(version),0)+1 FROM document_versions WHERE document_id=?', [$docId]); }

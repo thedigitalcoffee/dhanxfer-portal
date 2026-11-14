@@ -23,6 +23,8 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
         foreach (array_keys(COMPLIANCE_DEFAULTS) as $k) {
             if (!isset($_POST[$k])) { if (str_starts_with($k, 'block_')) { $v = '0'; } else continue; }
             elseif ($k === 'benef_high_risk_countries') $v = mb_substr(implode(', ', array_filter(array_map('trim', explode(',', post($k))))), 0, 1000);
+            elseif ($k === 'benef_four_eyes') $v = post($k) === '1' ? '1' : '0';
+            elseif ($k === 'benef_max_per_client') $v = (string)max(1, min(50, (int)post($k)));
             else $v = str_starts_with($k, 'block_') ? (post($k) === '1' ? '1' : '0') : (string)max(0, min(3650, (int)post($k)));
             if (setting($k) !== $v) { set_setting($k, $v); $changes[] = "$k=$v"; }
         }
@@ -83,7 +85,8 @@ page_head('Compliance Center'); ?>
     <?php foreach (['low' => 'Low', 'medium' => 'Medium', 'high' => 'High'] as $k => $l): ?><div class="f"><label for="rm<?= $k ?>"><?= $l ?> risk: refresh every (months)</label><input id="rm<?= $k ?>" name="refresh_months_<?= $k ?>" type="number" min="1" max="120" value="<?= e(setting('refresh_months_' . $k)) ?>"></div><?php endforeach; ?></div></fieldset>
   <fieldset <?= $manage ? '' : 'disabled' ?>><legend>Beneficiaries</legend><div class="fields">
     <div class="f wide"><label for="benef_high_risk_countries">High-risk countries (flagged for the reviewer, comma separated)</label><input id="benef_high_risk_countries" name="benef_high_risk_countries" value="<?= e(setting('benef_high_risk_countries')) ?>"></div>
-    <div class="f"><label for="benef_max_per_client">Most active beneficiaries per client</label><input id="benef_max_per_client" name="benef_max_per_client" type="number" min="1" max="50" value="<?= e(setting('benef_max_per_client')) ?>"></div></div></fieldset>
+    <div class="f"><label for="benef_max_per_client">Most active beneficiaries per client</label><input id="benef_max_per_client" name="benef_max_per_client" type="number" min="1" max="50" value="<?= e(setting('benef_max_per_client')) ?>"></div>
+    <div class="f wide"><label for="benef_four_eyes">Four-eyes rule</label><select id="benef_four_eyes" name="benef_four_eyes"><option value="1"<?= setting('benef_four_eyes', '1') === '1' ? ' selected' : '' ?>>On: whoever adds or changes a beneficiary cannot approve it</option><option value="0"<?= setting('benef_four_eyes', '1') === '0' ? ' selected' : '' ?>>Off (only for a one-person office; every decision is still logged)</option></select></div></div></fieldset>
   <fieldset <?= $manage ? '' : 'disabled' ?>><legend>When transfers are blocked</legend>
     <?php foreach (['block_unverified' => 'KYC not approved', 'block_expired_doc' => 'ID expired (after the grace days below)', 'block_rekyc_overdue' => 'KYC refresh overdue'] as $k => $l): ?><label class="check" style="margin:6px 0"><input type="checkbox" name="<?= $k ?>" value="1" <?= setting($k) === '1' ? 'checked' : '' ?>><span><?= e($l) ?></span></label><?php endforeach; ?>
     <div class="f" style="max-width:260px"><label for="expired_grace_days">Grace days after expiry</label><input id="expired_grace_days" name="expired_grace_days" type="number" min="0" max="90" value="<?= e(setting('expired_grace_days')) ?>"></div></fieldset>

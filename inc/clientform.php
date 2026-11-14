@@ -60,6 +60,14 @@ function nz($v) { return ($v === '' || $v === null) ? null : $v; }
 
 /** Insert a client row. $extra may hold kyc, risk, agent_id, source, consent, id_file, created_by. */
 function insert_client(array $v, array $extra): int {
+    require_once __DIR__ . '/kyc.php';
+    // one KYC identity per sender: checked and saved under one lock, so two saves of the same ID cannot both pass
+    return with_id_lock(function () use ($v, $extra) {
+        if (trim((string)($v['id_number'] ?? '')) !== '' && id_number_owner((string)$v['id_number'], 0)) throw new IdNumberTaken('This ID number already belongs to another client record. Every sender needs their own identity.');
+        return insert_client_locked($v, $extra);
+    });
+}
+function insert_client_locked(array $v, array $extra): int {
     $cols = array_merge(CLIENT_FIELDS, ['client_no', 'kyc', 'risk', 'agent_id', 'source', 'consent', 'id_file', 'created_by', 'id_number_hash']);
     $vals = [];
     foreach (CLIENT_FIELDS as $k) $vals[] = $k === 'id_number' ? enc(nz($v[$k] ?? '')) : nz($v[$k] ?? '');
@@ -164,7 +172,7 @@ function client_fields(array $v, array $benefs, string $mode, array $agents = []
     </fieldset>
     <fieldset>
       <legend><?= $mode === 'public' ? 'Who will you send money to? (optional)' : 'Beneficiaries' ?></legend>
-      <?php if (array_filter(array_column($benefs, 'id'))): ?>
+      <?php if (array_filter(array_column($benefs, 'id')) || ($mode !== 'public' && !empty($v['id']))): ?>
       <p class="tag" style="margin:0">Beneficiaries are added, changed, reviewed and deactivated on the client page (each change is reviewed and kept in the history).</p>
       <?php else: ?>
       <div id="benefs">

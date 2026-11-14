@@ -423,23 +423,59 @@ ok(!$bx && str_contains(implode(' ', $e), 'already saved'), 'the same account tw
 ok($b2 && (bool)array_filter(benef_flags($br($b2)), fn($f) => str_contains($f, 'other client')), 'the same account under another client is allowed but flagged for the reviewer');
 [$bn, $e] = benef_add($bc, ['name' => 'X', 'account' => '12<script>'], 'agent', null);
 ok(!$bn && count($e) >= 2, 'bad name and account formats are refused');
-foreach (['agent' => $agA, 'admin' => $admin, 'auditor' => $aud, 'staff' => $staff] as $who => $usr) { [$rok] = benef_review($br($b1), $usr, ['decision' => 'approve', 'screening_ref' => 'S-1', 'verification' => BENEF_VERIFY_METHODS[0], 'notes' => 'Checked with the client.']); ok(!$rok && $br($b1)['status'] === 'pending', "$who cannot approve a beneficiary"); }
-[$rok, $re] = benef_review($br($b1), $comp, ['decision' => 'approve', 'notes' => 'Checked with the client.']);
+$rv = fn($id, $x) => $x + ['rev' => $br($id)['rev']];
+foreach (['agent' => $agA, 'admin' => $admin, 'auditor' => $aud, 'staff' => $staff] as $who => $usr) { [$rok] = benef_review($br($b1), $usr, $rv($b1, ['decision' => 'approve', 'screening_ref' => 'S-1', 'verification' => BENEF_VERIFY_METHODS[0], 'notes' => 'Checked with the client.'])); ok(!$rok && $br($b1)['status'] === 'pending', "$who cannot approve a beneficiary"); }
+[$rok, $re] = benef_review($br($b1), $comp, $rv($b1, ['decision' => 'approve', 'notes' => 'Checked with the client.']));
 ok(!$rok && str_contains(implode(' ', $re), 'screening') && str_contains(implode(' ', $re), 'verified'), 'approval needs a screening reference and a verification method');
-[$rok] = benef_review($br($b1), $comp, ['decision' => 'approve', 'screening_ref' => 'SCREEN-B1', 'verification' => BENEF_VERIFY_METHODS[0], 'notes' => 'Confirmed by phone with the client.']);
+// the reviewer opened the page, then the agent changed the account: the old decision must not approve the new details
+$seen = $br($b1);
+benef_update($br($b1), ['name' => 'Ravi Kumar', 'relation' => 'Brother', 'country' => 'India', 'bank' => 'SBI', 'account' => 'IN 5555-0000-11', 'phone' => '+91 98765 43210'], (int)$agA['id']);
+[$rok, $re] = benef_review($seen, $comp, ['decision' => 'approve', 'screening_ref' => 'SCREEN-B1', 'verification' => BENEF_VERIFY_METHODS[0], 'notes' => 'Confirmed by phone with the client.', 'rev' => $seen['rev']]);
+ok(!$rok && $br($b1)['status'] === 'pending' && str_contains(implode(' ', $re), 'changed'), 'a decision on details that changed while the reviewer looked is refused');
+ok(!benef_review($br($b1), $comp, ['decision' => 'approve', 'screening_ref' => 'S', 'verification' => BENEF_VERIFY_METHODS[0], 'notes' => 'No version given here.'])[0], 'a decision without the reviewed version is refused');
+benef_update($br($b1), ['name' => 'Ravi Kumar', 'relation' => 'Brother', 'country' => 'India', 'bank' => 'SBI', 'account' => 'IN 1234-5678-90', 'phone' => '+91 98765 43210'], (int)$agA['id']);
+[$rok] = benef_review($br($b1), $comp, $rv($b1, ['decision' => 'approve', 'screening_ref' => 'SCREEN-B1', 'verification' => BENEF_VERIFY_METHODS[0], 'notes' => 'Confirmed by phone with the client.']));
 ok($rok && $br($b1)['status'] === 'active' && (int)$br($b1)['reviewed_by'] === (int)$comp['id'] && $br($b1)['screening_ref'] === 'SCREEN-B1', 'compliance approves: active, reviewer and screening recorded');
-[$rok] = benef_review($br($b1), $super, ['decision' => 'reject', 'notes' => 'Second decision attempt.']);
+[$rok] = benef_review($br($b1), $super, $rv($b1, ['decision' => 'reject', 'notes' => 'Second decision attempt.']));
 ok(!$rok, 'a decided beneficiary cannot be decided again');
 ok(benef_usable($br($b1), $bc)[0] && !benef_usable($br($b1), $bc2)[0] && !benef_usable($br($b2), $bc2)[0], 'only an approved beneficiary of the same client can receive a transfer');
-benef_update($br($b1), ['name' => 'Ravi Kumar', 'relation' => 'Brother', 'country' => 'India', 'bank' => 'SBI', 'account' => '', 'phone' => '+91 90000 00000'], (int)$agA['id']);
-ok($br($b1)['status'] === 'active' && dec($br($b1)['account']) === 'IN 1234-5678-90', 'changing only the phone keeps it approved; empty account keeps the number on file');
-benef_update($br($b1), ['name' => 'Ravi Kumar', 'relation' => 'Brother', 'country' => 'India', 'bank' => 'HDFC', 'account' => 'IN99887766', 'phone' => '+91 90000 00000'], (int)$agA['id']);
-ok($br($b1)['status'] === 'pending' && !benef_usable($br($b1), $bc)[0], 'changing bank or account sends it back to review and blocks transfers');
-$evs = all('SELECT * FROM beneficiary_events WHERE beneficiary_id=? ORDER BY id', [$b1]);
-ok(count($evs) === 4 && $evs[3]['fields'] === 'bank,account' && !preg_match('/9988|1234/', json_encode($evs)) && !preg_match('/9988|1234/', (string)val("SELECT GROUP_CONCAT(detail) FROM audit WHERE action LIKE 'beneficiary_%'")), 'history records each step and which fields changed, never the account numbers');
-benef_deactivate($br($b1), 'No longer used', (int)$agA['id']);
-[$uok] = benef_update($br($b1), ['name' => 'Ravi Kumar', 'bank' => 'SBI', 'account' => 'IN1'], (int)$agA['id']);
-ok($br($b1)['status'] === 'deactivated' && !$uok && !benef_usable($br($b1), $bc)[0], 'deactivated beneficiary is kept, cannot be edited back, cannot receive money');
+// four-eyes: whoever adds a beneficiary cannot approve it
+[$bf] = benef_add($bc, ['name' => 'Asha Patel', 'country' => 'India', 'bank' => 'ICICI', 'account' => 'IC00112233'], 'admin', (int)$comp['id']);
+[$rok, $re] = benef_review($br($bf), $comp, $rv($bf, ['decision' => 'approve', 'screening_ref' => 'S-F', 'verification' => BENEF_VERIFY_METHODS[1], 'notes' => 'Bank statement seen.']));
+ok(!$rok && str_contains(implode(' ', $re), 'another reviewer'), 'four-eyes: the person who added a beneficiary cannot approve it');
+ok(benef_review($br($bf), $super, $rv($bf, ['decision' => 'approve', 'screening_ref' => 'S-F', 'verification' => BENEF_VERIFY_METHODS[1], 'notes' => 'Bank statement seen.']))[0], 'a second reviewer can approve it');
+// approved details are never overwritten: a change (even only the phone) is a new version that waits for review
+$before = $br($b1);
+q("INSERT INTO transfers (ref_no, client_id, client_name, beneficiary_id, send_amount, status, transfer_date) VALUES ('TX-BENEF-1', ?, 'Benef Sender', ?, 100, 'completed', ?)", [$bc, $b1, today()]);
+[$v2, $e] = benef_update($br($b1), ['name' => 'Ravi Kumar', 'relation' => 'Brother', 'country' => 'India', 'bank' => 'SBI', 'account' => '', 'phone' => '+91 90000 00000'], (int)$agA['id']);
+$old = $br($b1);
+ok($v2 && $v2 !== $b1 && $old['status'] === 'deactivated' && (int)$old['replaced_by'] === $v2 && $old['account'] === $before['account'] && $old['phone'] === $before['phone'] && $old['screening_ref'] === 'SCREEN-B1',
+   'editing an approved beneficiary keeps the approved row unchanged and makes a new version');
+ok($br($v2)['status'] === 'pending' && dec($br($v2)['account']) === 'IN 1234-5678-90' && $br($v2)['phone'] === '+91 90000 00000' && !benef_usable($br($v2), $bc)[0], 'the new version (phone changed, account kept) waits for review');
+ok((int)val("SELECT beneficiary_id FROM transfers WHERE ref_no='TX-BENEF-1'") === $b1 && dec($old['account']) === 'IN 1234-5678-90', 'the past transfer still points to the exact details that were approved and paid');
+ok(!benef_usable($old, $bc)[0] && str_contains(benef_usable($old, $bc)[1], 'new version #' . $v2), 'the old version cannot receive new transfers and says where the new one is');
+[$v2b] = benef_update($br($v2), ['name' => 'Ravi Kumar', 'relation' => 'Brother', 'country' => 'India', 'bank' => 'HDFC', 'account' => 'IN99887766', 'phone' => '+91 90000 00000'], (int)$agA['id']);
+ok($v2b === $v2 && (int)$br($v2)['rev'] === 1 && dec($br($v2)['account']) === 'IN99887766', 'a version still waiting for review is corrected in place (its version number goes up)');
+[$rok, $re] = benef_review($br($v2), $comp, $rv($v2, ['decision' => 'approve', 'screening_ref' => 'S', 'verification' => BENEF_VERIFY_METHODS[0], 'notes' => 'Confirmed by phone again.']));
+ok($rok, 'the reviewer approves the new version');
+$evs = all('SELECT * FROM beneficiary_events WHERE beneficiary_id IN (?,?) ORDER BY id', [$b1, $v2]);
+ok(implode(',', array_column($evs, 'action')) === 'added,edited,edited,approved,added,replaced,edited,edited,approved'
+   && !preg_match('/9988|1234|5555/', json_encode($evs)) && !preg_match('/9988|1234|5555/', (string)val("SELECT GROUP_CONCAT(detail) FROM audit WHERE action LIKE 'beneficiary_%'")), 'history records each step and which fields changed, never the account numbers');
+benef_deactivate($br($v2), 'No longer used', (int)$agA['id']);
+[$uok] = benef_update($br($v2), ['name' => 'Ravi Kumar', 'bank' => 'SBI', 'account' => 'IN1'], (int)$agA['id']);
+ok($br($v2)['status'] === 'deactivated' && !$uok && !benef_usable($br($v2), $bc)[0], 'deactivated beneficiary is kept, cannot be edited back, cannot receive money');
+// a rejected beneficiary stays rejected: it cannot be edited, and adding it again shows the reviewer the earlier rejection
+[$rok] = benef_review($br($b2), $comp, $rv($b2, ['decision' => 'reject', 'notes' => 'Name matched a sanctions list entry.']));
+[$uok, $ue] = benef_update($br($b2), ['name' => 'Ravi Kumaar', 'bank' => 'SBI', 'account' => 'IN1234567890'], (int)$agB['id']);
+ok($rok && !$uok && $br($b2)['status'] === 'rejected', 'a rejected beneficiary cannot be edited back into review');
+[$b2b] = benef_add($bc2, ['name' => 'R. Kumar', 'bank' => 'SBI', 'account' => 'IN-1234-5678-90'], 'agent', (int)$agB['id']);
+ok($b2b && (bool)array_filter(benef_flags($br($b2b)), fn($f) => str_contains($f, 'rejected before')), 'the same account added again is flagged as rejected before');
+// older records with an account in a format the form no longer accepts can still be edited
+q("INSERT INTO beneficiaries (client_id, name, bank, account, status, account_hash, rev) VALUES (?, 'Legacy Long', 'Old Bank', ?, 'active', ?, 0)", [$bc, enc(str_repeat('7', 80)), benef_account_hash(str_repeat('7', 80))]);
+$lg = (int)db()->lastInsertId();
+[$lv] = benef_update($br($lg), ['name' => 'Legacy Long', 'relation' => 'Cousin', 'bank' => 'Old Bank', 'account' => ''], (int)$agA['id']);
+ok($lv && dec($br($lv)['account']) === str_repeat('7', 80), 'a legacy 80-digit account can be kept while other details are edited');
+benef_deactivate($br($lv), 'test', null);
 [$b3] = benef_add($bc, ['name' => 'Ravi Kumar', 'bank' => 'HDFC', 'account' => 'IN99887766'], 'agent', null);
 ok((bool)$b3, 'after deactivation the same person can be added again (and is reviewed again)');
 set_setting('benef_max_per_client', '2'); benef_add($bc, ['name' => 'Second Person', 'bank' => 'B', 'account' => 'AC0002'], 'agent', null);
@@ -473,6 +509,18 @@ ok(!$s4, 'at most 3 codes per hour for one client');
 q('DELETE FROM client_otps WHERE client_id=?', [$bc]); otp_send($ocl, 'upload'); q('UPDATE client_otps SET code_hash=?, expires_at=DATE_SUB(NOW(), INTERVAL 1 MINUTE) WHERE client_id=?', [otp_hash($bc, 'upload', '333444'), $bc]);
 ok(!otp_verify($bc, 'upload', '333444'), 'an expired code is refused');
 ok(otp_channels(['email' => 'x@example.com', 'phone_e164' => '+14165550000'] + $ocl) === ['email' => otp_mask_email('x@example.com')], 'SMS is not offered while no SMS provider is connected');
+q('DELETE FROM client_otps WHERE client_id=?', [$bc]);
+for ($i = 0; $i < 6; $i++) q("INSERT INTO client_otps (client_id, purpose, channel, code_hash, expires_at, created_at) VALUES (?, 'returning', 'email', 'x', NOW(), DATE_SUB(NOW(), INTERVAL 3 HOUR))", [$bc]);
+[$s5, $m5] = otp_send($ocl, 'returning');
+ok(!$s5 && str_contains($m5, 'today') && (int)val("SELECT COUNT(*) FROM audit WHERE action='otp_daily_cap' AND entity_id=?", [$bc]) === 1, 'at most 6 codes a day per client; staff are alerted once');
+
+// ---- 20. one KYC identity per sender, enforced where every ID is saved ----
+$taken = false; try { doc_add_version($bc, ['doc_type' => 'Passport', 'number' => 'X9988776', 'expires_on' => date('Y-m-d', strtotime('+3 years'))], 'upload_link', null); } catch (IdNumberTaken $ex) { $taken = true; }
+ok($taken && !val('SELECT 1 FROM document_versions WHERE client_id=? AND number_hash=?', [$bc, id_hash('X9988776')]), 'an ID number of another client cannot be added to a client through any path (upload link, update, import)');
+$taken = false; $nc = (int)val('SELECT COUNT(*) FROM clients'); try { insert_client(array_merge(array_fill_keys(CLIENT_FIELDS, ''), ['name' => 'Copy Cat', 'phone' => '+1 416 555 0499', 'office' => 'Canada', 'id_number' => 'x9988776']), ['source' => 'admin']); } catch (IdNumberTaken $ex) { $taken = true; }
+ok($taken && (int)val('SELECT COUNT(*) FROM clients') === $nc, 'a new client with an ID number already on file is refused before any record is made');
+$own = doc_add_version($cB, ['doc_type' => 'Passport', 'number' => 'X9988776', 'expires_on' => date('Y-m-d', strtotime('+3 years'))], 'admin', null);
+ok($own > 0, 'the owner of the ID number can still add a new version of it');
 
 $summary = sprintf("%s  %d passed, %d failed\n", date('Y-m-d H:i:s'), $pass, $fail);
 $report = $summary . implode("\n", $out) . "\n";
