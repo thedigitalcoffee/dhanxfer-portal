@@ -375,7 +375,7 @@ $ret = new Browser(); $ret->req('/register?returning=1');
 $ret->req('/register', ['csrf' => $ret->csrf(), 'act' => 'returning', 'client_no' => (string)val('SELECT client_no FROM clients WHERE id=?', [$kc]), 'dob' => '1988-02-03', 'last4' => '7020']);
 ok(str_contains($ret->body, 'Welcome back') && !str_contains($ret->body, 'E2EKYC') && !str_contains($ret->body, '12 Main Street'), 'returning client is recognised and sees only masked hints');
 snap('returning', $ret->body);
-ok(!str_contains($ret->body, 'Toronto') && !str_contains($ret->body, 'Passport'), 'returning page shows no city or ID details, only the phone ending');
+ok(!str_contains($ret->body, 'lives in') && !str_contains($ret->body, 'valid until') && !str_contains($ret->body, 'E2EKYC'), 'returning page shows no city or ID details, only the phone ending');
 $cno12 = (string)val('SELECT client_no FROM clients WHERE id=?', [$kc]);
 for ($i = 0; $i < 5; $i++) q('INSERT INTO login_attempts (ip, username) VALUES (?, ?)', ['198.51.100.' . $i, 'returning:' . substr(hash('sha256', $cno12), 0, 40)]);
 $ret2 = new Browser(); $ret2->req('/register?returning=1');
