@@ -38,7 +38,7 @@ if ($isAdmin && get('export') === 'csv') {
 }
 $rows = all($sql . ' LIMIT 500', $par);
 $check = null;
-if ($isAdmin && get('verify') === '1') { $check = audit_verify(); audit('audit_verified', 'audit', null, $check[1] ? 'BROKEN at row ' . $check[1] : 'intact, ' . $check[0] . ' rows'); }
+if ($isAdmin && $_SERVER['REQUEST_METHOD'] === 'POST' && post('act') === 'verify') { $check = audit_verify(); audit('audit_verified', 'audit', null, $check[1] ? 'BROKEN at row ' . $check[1] : ($check[3] ? 'checkpoint missing' : 'intact, ' . $check[0] . ' rows')); }
 $counts = $isAdmin ? all("SELECT u.id, u.name, COUNT(a.id) n, MAX(a.created_at) last FROM users u LEFT JOIN audit a ON a.user_id=u.id AND a.created_at >= (NOW() - INTERVAL 30 DAY) GROUP BY u.id, u.name ORDER BY n DESC") : [];
 page_head($isAdmin ? 'Activity history' : 'My activity'); ?>
 <div class="spread"><div><h1><?= $isAdmin ? 'Activity history' : 'My activity' ?></h1>
@@ -47,8 +47,8 @@ page_head($isAdmin ? 'Activity history' : 'My activity'); ?>
 <?php if ($isAdmin): ?>
 <div class="card row" style="justify-content:space-between">
   <span>Every row is chained to the one before it, so a row changed or removed in the database is detected.</span>
-  <a class="btn sm" href="/?p=audit&verify=1">Check the log is intact</a>
-  <?php if ($check): ?><div class="banner <?= $check[1] ? 'bad' : 'ok' ?>" style="flex-basis:100%;margin:0"><?= $check[1] ? 'Warning: the log was changed at row ' . (int)$check[1] . '. Rows from there on cannot be trusted.' : 'Intact: all ' . (int)$check[0] . ' chained rows match.' ?><?= $check[2] ? ' ' . (int)$check[2] . ' older rows were written before the check existed.' : '' ?></div><?php endif; ?>
+  <form method="post" class="inline"><?= csrf_field() ?><button class="btn sm" name="act" value="verify">Check the log is intact</button></form>
+  <?php if ($check): ?><div class="banner <?= ($check[1] || $check[3]) ? 'bad' : 'ok' ?>" style="flex-basis:100%;margin:0"><?= $check[1] ? 'Warning: the log was changed at row ' . (int)$check[1] . '. Rows from there on cannot be trusted.' : ($check[3] ? 'Warning: ' . e($check[3]) : 'Intact: all ' . (int)$check[0] . ' chained rows match, including the latest daily checkpoint.') ?><?= $check[2] ? ' ' . (int)$check[2] . ' older rows were written before the check existed.' : '' ?></div><?php endif; ?>
 </div>
 <?php endif; ?>
 <?php if ($isAdmin && $counts): ?>

@@ -56,7 +56,7 @@ function db(): PDO {
     return $pdo;
 }
 
-const SCHEMA_VERSION = '4';
+const SCHEMA_VERSION = '5';
 /** Creates missing tables/columns after an upload of a newer version. Runs one cheap query per request. */
 function migrate(): void {
     $ver = null;
@@ -76,7 +76,8 @@ function migrate(): void {
         ['clients', 'id_number_hash', 'CHAR(64) NULL'],
         ['submissions', 'app_ref', 'VARCHAR(30) NULL'], ['submissions', 'ref_verified', 'TINYINT(1) NOT NULL DEFAULT 0'],
         ['password_resets', 'purpose', "VARCHAR(20) NOT NULL DEFAULT 'reset'"],
-        ['audit', 'prev_hash', 'CHAR(64) NULL'], ['audit', 'row_hash', 'CHAR(64) NULL']);
+        ['audit', 'prev_hash', 'CHAR(64) NULL'], ['audit', 'row_hash', 'CHAR(64) NULL'],
+        ['users', 'mfa_token_only', 'TINYINT(1) NOT NULL DEFAULT 0']);
     foreach ($cols as [$t, $c, $def]) {
         if ($def === null) continue;
         $has = db()->prepare('SELECT 1 FROM information_schema.COLUMNS WHERE TABLE_SCHEMA=DATABASE() AND TABLE_NAME=? AND COLUMN_NAME=?');
@@ -106,8 +107,10 @@ function migrate(): void {
         foreach (['compliance', 'auditor'] as $role) foreach (DEFAULT_PERMS[$role] as $perm) $ins->execute([$role, $perm]);
         $ins->execute(['super_admin', 'pii.reveal']);
     }
-    // v4: encrypt ID and account numbers that were saved before encryption existed
-    if (enc_ready()) {
+    // v4: encrypt ID and account numbers that were saved before encryption existed.
+    // Without a key the version is not recorded, so this runs again until the key is in place.
+    if (!enc_ready()) return;
+    {
         foreach (db()->query("SELECT id, id_number FROM clients WHERE id_number IS NOT NULL AND id_number<>'' AND id_number NOT LIKE 'enc:%'")->fetchAll() as $r)
             db()->prepare('UPDATE clients SET id_number=?, id_number_hash=? WHERE id=?')->execute([enc($r['id_number']), id_hash($r['id_number']), $r['id']]);
         foreach (db()->query("SELECT id, account FROM beneficiaries WHERE account IS NOT NULL AND account<>'' AND account NOT LIKE 'enc:%'")->fetchAll() as $r)
@@ -242,8 +245,15 @@ function require_perm(string ...$perms): array {
 function require_login(): array {
     $u = me();
     if (!$u) redirect('/login.php?next=' . urlencode($_SERVER['REQUEST_URI'] ?? '/'));
+    // A role that needs two-step login never gets a working session without it.
+    if (mfa_required($u) && !$u['mfa_enabled']) {
+        session_unset();
+        flash('Your role needs two-step login. Log in again to set it up.', 'warn');
+        redirect('/login.php');
+    }
     return $u;
 }
+function mfa_required(array $user): bool { return in_array($user['role'], MFA_REQUIRED, true); }
 
 function audit(string $action, string $entity = '', $entityId = null, string $detail = ''): void {
     $u = me();
@@ -255,30 +265,59 @@ function audit(string $action, string $entity = '', $entityId = null, string $de
  */
 function audit_write(?int $userId, string $action, string $entity, $entityId, string $detail, string $ip): void {
     $detail = mb_substr($detail, 0, 500);
-    $lock = (int)db()->query("SELECT GET_LOCK('dx_audit', 5)")->fetchColumn();
+    $lock = (int)db()->query("SELECT GET_LOCK('dx_audit', 10)")->fetchColumn();
+    if (!$lock) throw new RuntimeException('The activity log is busy. Please try again.');
     try {
         $prev = (string)(db()->query('SELECT row_hash FROM audit ORDER BY id DESC LIMIT 1')->fetchColumn() ?: '');
         $at = date('Y-m-d H:i:s');
         $hash = audit_hash($prev, $userId, $action, $entity, $entityId, $detail, $ip, $at);
         q('INSERT INTO audit (user_id, action, entity, entity_id, detail, ip, created_at, prev_hash, row_hash) VALUES (?,?,?,?,?,?,?,?,?)',
             [$userId, $action, $entity, $entityId, $detail, $ip, $at, $prev ?: null, $hash]);
-    } finally { if ($lock) db()->query("SELECT RELEASE_LOCK('dx_audit')"); }
+    } finally { db()->query("SELECT RELEASE_LOCK('dx_audit')"); }
 }
 function audit_hash(string $prev, $userId, string $action, ?string $entity, $entityId, ?string $detail, ?string $ip, string $at): string {
-    return hash_hmac('sha256', implode('|', [$prev, (string)$userId, $action, (string)$entity, (string)$entityId, (string)$detail, (string)$ip, $at]), sec_key('audit'));
+    $msg = '';
+    foreach ([$prev, (string)$userId, $action, (string)$entity, (string)$entityId, (string)$detail, (string)$ip, $at] as $f) $msg .= strlen($f) . ':' . $f . ';';
+    return hash_hmac('sha256', $msg, sec_key('audit'));
 }
-/** Checks the whole chain. Returns [rows checked, first broken row id or null, rows written before the chain existed]. */
+/**
+ * Checks the whole chain. Returns [rows checked, first broken row id or null, rows written before the chain existed, anchor problem or null].
+ * Rows without a hash are only accepted before the first chained row. The newest checkpoint saved outside the
+ * database (storage/audit-anchors.log, plus the daily email) must still be in the chain, so cutting off the newest rows shows up.
+ */
 function audit_verify(): array {
-    $prev = ''; $n = 0; $legacy = 0;
+    $prev = ''; $n = 0; $legacy = 0; $chained = false; $seen = [];
     $st = db()->query('SELECT * FROM audit ORDER BY id');
     while ($r = $st->fetch()) {
-        if ($r['row_hash'] === null) { $legacy++; continue; }
+        if ($r['row_hash'] === null) { if ($chained) return [$n, (int)$r['id'], $legacy, null]; $legacy++; continue; }
+        $chained = true;
         $n++;
-        if ((string)$r['prev_hash'] !== $prev) return [$n, (int)$r['id'], $legacy];
-        if (!hash_equals($r['row_hash'], audit_hash((string)$r['prev_hash'], $r['user_id'], $r['action'], $r['entity'], $r['entity_id'], $r['detail'], $r['ip'], $r['created_at']))) return [$n, (int)$r['id'], $legacy];
+        if ((string)$r['prev_hash'] !== $prev) return [$n, (int)$r['id'], $legacy, null];
+        if (!hash_equals($r['row_hash'], audit_hash((string)$r['prev_hash'], $r['user_id'], $r['action'], $r['entity'], $r['entity_id'], $r['detail'], $r['ip'], $r['created_at']))) return [$n, (int)$r['id'], $legacy, null];
         $prev = $r['row_hash'];
+        $seen[(int)$r['id']] = $r['row_hash'];
     }
-    return [$n, null, $legacy];
+    $anchor = audit_last_anchor();
+    $problem = null;
+    if ($anchor && (!isset($seen[$anchor['id']]) || !hash_equals($seen[$anchor['id']], $anchor['hash']))) $problem = 'Rows up to #' . $anchor['id'] . ' were in the log on ' . $anchor['at'] . ' but are now missing or changed.';
+    return [$n, null, $legacy, $problem];
+}
+function audit_anchor_file(): string { return dirname(__DIR__) . '/storage/audit-anchors' . (defined('DX_TEST') ? '.test' : '') . '.log'; }
+/** Saves today's newest row and its hash outside the database. Returns the line written. */
+function audit_write_anchor(): ?string {
+    $r = db()->query('SELECT id, row_hash FROM audit WHERE row_hash IS NOT NULL ORDER BY id DESC LIMIT 1')->fetch();
+    if (!$r) return null;
+    $line = date('c') . ' ' . $r['id'] . ' ' . $r['row_hash'];
+    @file_put_contents(audit_anchor_file(), $line . "\n", FILE_APPEND | LOCK_EX);
+    return $line;
+}
+function audit_last_anchor(): ?array {
+    $f = audit_anchor_file();
+    if (!is_file($f)) return null;
+    $lines = array_filter(array_map('trim', file($f)));
+    $last = end($lines);
+    if (!$last || count($p = explode(' ', $last)) !== 3) return null;
+    return ['at' => $p[0], 'id' => (int)$p[1], 'hash' => $p[2]];
 }
 
 /* ---------- encryption, masking, signing ---------- */
@@ -293,7 +332,6 @@ function enc_ready(): bool { try { master_key(); return true; } catch (Throwable
 function sec_key(string $purpose): string { return hash_hmac('sha256', 'dhanxfer:' . $purpose, master_key(), true); }
 function enc(?string $plain): ?string {
     if ($plain === null || $plain === '') return $plain;
-    if (str_starts_with($plain, 'enc:v1:')) return $plain;
     $nonce = random_bytes(SODIUM_CRYPTO_SECRETBOX_NONCEBYTES);
     return 'enc:v1:' . base64_encode($nonce . sodium_crypto_secretbox($plain, $nonce, sec_key('data')));
 }

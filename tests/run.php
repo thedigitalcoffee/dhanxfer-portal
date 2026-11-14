@@ -61,6 +61,8 @@ ok(!role_can('staff', 'transfers.decide'), 'operations staff cannot accept trans
 // ---- 3. encryption and masking ----
 ok(str_starts_with((string)$rowA['id_number'], 'enc:v1:') && dec($rowA['id_number']) === 'P1234567', 'ID number stored encrypted and decrypts');
 ok(enc('P1234567') !== enc('P1234567'), 'same value encrypts differently each time');
+$fake = 'enc:v1:' . base64_encode(random_bytes(40));
+ok(enc($fake) !== $fake && dec(enc($fake)) === $fake, 'text that looks encrypted is still encrypted, never stored as given');
 $t = $rowA['id_number']; $t[20] = $t[20] === 'A' ? 'B' : 'A';
 ok(dec($t) === null, 'tampered ciphertext is rejected');
 ok(mask('P1234567') === '•••• 4567' && mask('12') === '••', 'masking shows last 4 only');
@@ -101,6 +103,9 @@ ok(!mfa_check(one('SELECT * FROM users WHERE id=?', [$admin['id']]), $code), 'sa
 ok(!mfa_check(one('SELECT * FROM users WHERE id=?', [$admin['id']]), '000000') || $code === '000000', 'wrong code rejected');
 ok(mfa_check(one('SELECT * FROM users WHERE id=?', [$admin['id']]), 'abcde-12345'), 'recovery code works');
 ok(!mfa_check(one('SELECT * FROM users WHERE id=?', [$admin['id']]), 'ABCDE-12345'), 'recovery code works only once');
+q('UPDATE users SET mfa_recovery=? WHERE id=?', [json_encode([password_hash('RACE000001', PASSWORD_DEFAULT)]), $admin['id']]);
+$snap1 = one('SELECT * FROM users WHERE id=?', [$admin['id']]); $snap2 = $snap1; // two requests read the same row
+ok(mfa_check($snap1, 'RACE0-00001') && !mfa_check($snap2, 'RACE0-00001'), 'two requests at once cannot both use one recovery code');
 ok(mfa_required($admin) && mfa_required($super) && mfa_required($comp) && !mfa_required($agA), 'two-step login required for super admin, admin and compliance');
 
 // ---- 7. tamper-evident activity log ----
@@ -113,6 +118,18 @@ q("UPDATE audit SET detail='edited' WHERE id=?", [$mid]);
 ok(audit_verify()[1] === $mid, 'editing a log row is detected at that row');
 q('DELETE FROM audit WHERE id=?', [$mid]);
 ok(audit_verify()[1] !== null, 'deleting a log row is detected');
+// fresh chain for the next checks
+q('TRUNCATE TABLE audit'); @unlink(audit_anchor_file());
+for ($i = 0; $i < 3; $i++) audit('test_event', 'test', $i, "row $i");
+q("INSERT INTO audit (user_id, action, detail) VALUES (NULL, 'forged', 'no hash')");
+ok(audit_verify()[1] !== null, 'a forged row without a hash, after the chain started, is detected');
+q("DELETE FROM audit WHERE action='forged'");
+audit_write_anchor();
+$last = (int)val('SELECT MAX(id) FROM audit');
+ok(audit_verify()[1] === null && audit_verify()[3] === null, 'chain and daily checkpoint agree');
+q('DELETE FROM audit WHERE id=?', [$last]);
+ok(audit_verify()[3] !== null, 'cutting off the newest rows is detected by the checkpoint');
+@unlink(audit_anchor_file());
 
 // ---- 8. commission ----
 q("INSERT INTO agent_commissions (agent_id, send_currency, receive_currency, per_unit) VALUES (?, 'CAD', 'INR', 0.25)", [$agA['id']]);

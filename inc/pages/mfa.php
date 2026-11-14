@@ -1,6 +1,7 @@
 <?php
 defined('DX') or exit;
 require_once __DIR__ . '/../mfa.php';
+strict_csp();
 $codesShown = null;
 
 if ($_SERVER['REQUEST_METHOD'] === 'POST') {
@@ -53,15 +54,12 @@ page_head('Two-step login'); ?>
     <p class="tag" style="margin-top:0"><?= mfa_required($u) ? 'Your role needs this before you can continue.' : 'Recommended: protects your account even if someone learns your password.' ?></p>
     <ol>
       <li>Install an authenticator app on your phone: Google Authenticator, Microsoft Authenticator or Authy.</li>
-      <li>In the app, add an account and scan this code. On this phone? <a href="<?= e($uri) ?>">Tap here to add it</a>.</li>
+      <li>On this phone, <a href="<?= e($uri) ?>">tap here to add DhanXfer to the app</a>. On a computer, choose "Enter a setup key" in the app and type the key below.</li>
     </ol>
-    <div id="qr" style="background:#fff;padding:12px;border-radius:10px;width:max-content;margin:8px 0" data-uri="<?= e($uri) ?>"></div>
-    <p class="tag">Can't scan? Type this key in the app: <strong class="num" style="letter-spacing:.08em"><?= e(trim(chunk_split($secret, 4, ' '))) ?></strong></p>
+    <p class="tag">Setup key: <strong class="num" style="letter-spacing:.08em"><?= e(trim(chunk_split($secret, 4, ' '))) ?></strong></p>
     <form method="post"><?= csrf_field() ?><input type="hidden" name="act" value="enable">
       <div class="f" style="margin:12px 0"><label for="code">3. Type the 6-digit code the app shows</label><input id="code" name="code" required inputmode="numeric" autocomplete="one-time-code" style="font-size:20px;letter-spacing:.2em;text-align:center"></div>
       <button class="btn gold" style="width:100%">Turn on two-step login</button></form>
-    <script src="https://cdnjs.cloudflare.com/ajax/libs/qrcodejs/1.0.0/qrcode.min.js"></script>
-    <script>try { var q = document.getElementById('qr'); new QRCode(q, { text: q.getAttribute('data-uri'), width: 180, height: 180 }); } catch (e) { document.getElementById('qr').style.display = 'none'; }</script>
   <?php endif; ?>
 </div>
 <?php page_foot();

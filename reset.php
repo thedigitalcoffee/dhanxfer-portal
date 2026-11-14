@@ -20,6 +20,14 @@ if ($valid && $_SERVER['REQUEST_METHOD'] === 'POST') {
         if ($done) {
             q('UPDATE users SET password_hash=?, must_change_password=0, session_version=session_version+1 WHERE id=?', [password_hash($p1, PASSWORD_DEFAULT), $row['user_id']]);
             audit_write((int)$row['user_id'], $row['purpose'] === 'activate' ? 'account_activated' : 'reset_link_used', 'user', $row['user_id'], $row['purpose'] === 'activate' ? 'Account activated' : 'Password set with reset link', client_ip());
+            $usr = one('SELECT * FROM users WHERE id=?', [$row['user_id']]);
+            if ($usr && in_array($usr['role'], MFA_REQUIRED, true) && !$usr['mfa_enabled']) {
+                // The person just proved they hold the admin's link: let them set up two-step login now.
+                session_regenerate_id(true);
+                unset($_SESSION['uid'], $_SESSION['sv']);
+                $_SESSION['enroll_uid'] = (int)$usr['id']; $_SESSION['enroll_at'] = time(); $_SESSION['enroll_token'] = 1;
+                redirect('/mfa_setup.php');
+            }
             flash($row['purpose'] === 'activate' ? 'Your account is active. Log in with your login ID and new password.' : 'Your new password is saved. Log in with it now.');
             redirect('/login.php');
         }

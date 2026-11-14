@@ -52,11 +52,30 @@ function mfa_check(array $user, string $input): bool {
     foreach ($codes as $i => $hash) {
         if (password_verify($norm, $hash)) {
             unset($codes[$i]);
-            q('UPDATE users SET mfa_recovery=? WHERE id=?', [json_encode(array_values($codes)), $user['id']]);
+            // Only succeeds if nobody used a code in the meantime, so one code cannot work twice at once.
+            if (q('UPDATE users SET mfa_recovery=? WHERE id=? AND mfa_recovery=?', [json_encode(array_values($codes)), $user['id'], (string)$user['mfa_recovery']])->rowCount() !== 1) return false;
             audit_write((int)$user['id'], 'mfa_recovery_used', 'user', $user['id'], count($codes) . ' recovery codes left', client_ip());
             return true;
         }
     }
     return false;
 }
-function mfa_required(array $user): bool { return in_array($user['role'], MFA_REQUIRED, true); }
+
+/** Wrong-code limits: 5 per 15 minutes, 15 per day. Returns a message when locked. Alerts the admins once a day is reached. */
+function mfa_locked(int $uid): ?string {
+    $key = 'mfa:' . $uid;
+    if ((int)val('SELECT COUNT(*) FROM login_attempts WHERE username=? AND at > (NOW() - INTERVAL 1 DAY)', [$key]) >= 15) return 'Two-step login is locked for 24 hours after too many wrong codes. Ask the super admin to check your account.';
+    if ((int)val('SELECT COUNT(*) FROM login_attempts WHERE username=? AND at > (NOW() - INTERVAL 15 MINUTE)', [$key]) >= 5) return 'Too many wrong codes. Wait 15 minutes and log in again.';
+    return null;
+}
+function mfa_fail(int $uid): void {
+    $key = 'mfa:' . $uid;
+    q('INSERT INTO login_attempts (ip, username) VALUES (?,?)', [client_ip(), $key]);
+    audit_write($uid, 'mfa_failed', 'user', $uid, 'Wrong two-step code', client_ip());
+    $n = (int)val('SELECT COUNT(*) FROM login_attempts WHERE username=? AND at > (NOW() - INTERVAL 1 DAY)', [$key]);
+    if ($n === 5 || $n === 15) notify('Security alert: wrong two-step codes', "User #$uid has entered $n wrong two-step codes in the last 24 hours, which suggests someone else knows their password. Check the Activity history and consider resetting their password.");
+}
+/** Strict browser rules for the pages that show or take two-step codes: no outside scripts at all. */
+function strict_csp(): void {
+    header("Content-Security-Policy: default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; font-src https://fonts.gstatic.com; img-src 'self' data:; form-action 'self'; frame-ancestors 'none'; base-uri 'none'");
+}

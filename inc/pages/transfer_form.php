@@ -42,7 +42,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
     }
 }
 $benefList = [];
-if ($v['client_id'] && isset($byId[$v['client_id']])) foreach (all('SELECT name, relation, bank, account FROM beneficiaries WHERE client_id=?', [(int)$v['client_id']]) as $b) $benefList[] = trim($b['name'] . ($b['relation'] ? " ({$b['relation']})" : '') . ($b['bank'] ? " · {$b['bank']}" : '') . ($b['account'] ? " · {$b['account']}" : ''));
+if ($v['client_id'] && isset($byId[$v['client_id']])) foreach (all('SELECT name, relation, bank, account FROM beneficiaries WHERE client_id=?', [(int)$v['client_id']]) as $b) $benefList[] = trim($b['name'] . ($b['relation'] ? " ({$b['relation']})" : '') . ($b['bank'] ? " · {$b['bank']}" : '') . ($b['account'] ? ' · ' . (can('pii.reveal') ? dec($b['account']) : mask(dec($b['account']))) : ''));
 
 page_head($canDecide ? 'New transfer' : 'Request transfer'); ?>
 <div class="spread"><div><h1><?= $canDecide ? 'New transfer' : 'Request a transfer' ?></h1>

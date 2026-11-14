@@ -2,7 +2,7 @@
 defined('DX') or exit;
 
 /** Read and clean the client fields from POST. Returns [fields, beneficiaries, errors]. */
-function read_client_post(): array {
+function read_client_post(int $clientId = 0): array {
     $v = [];
     foreach (CLIENT_FIELDS as $k) $v[$k] = mb_substr(post($k), 0, $k === 'notes' ? 4000 : 250);
     foreach (['dob', 'id_expiry'] as $d) $v[$d] = $v[$d] !== '' ? (valid_date($v[$d]) ?? '') : '';
@@ -20,7 +20,8 @@ function read_client_post(): array {
             if ($name === '') continue;
             $g = fn($k) => (isset($_POST[$k][$i]) && is_string($_POST[$k][$i])) ? mb_substr(trim($_POST[$k][$i]), 0, 120) : '';
             $acct = $g('b_account');
-            if ($acct === '') { $keep = $_POST['b_account_keep'][$i] ?? ''; if (is_string($keep) && str_starts_with($keep, 'enc:v1:') && dec($keep) !== null) $acct = $keep; }
+            $keepId = (int)($_POST['b_keep_id'][$i] ?? 0);
+            if ($acct === '' && $keepId && $clientId) $acct = (string)dec((string)val('SELECT account FROM beneficiaries WHERE id=? AND client_id=?', [$keepId, $clientId]));
             $b[] = ['name' => mb_substr($name, 0, 160), 'relation' => $g('b_relation'), 'country' => $g('b_country'), 'bank' => $g('b_bank'), 'account' => $acct, 'phone' => $g('b_phone')];
             if (count($b) >= 10) break;
         }
@@ -130,7 +131,7 @@ function client_fields(array $v, array $benefs, string $mode, array $agents = []
           <div class="f"><label>Relationship</label><input name="b_relation[]" value="<?= $bv('relation') ?>" placeholder="Mother, brother…"></div>
           <div class="f"><label>Country</label><input name="b_country[]" list="countries" value="<?= $bv('country') ?>"></div>
           <div class="f"><label>Bank name</label><input name="b_bank[]" value="<?= $bv('bank') ?>"></div>
-          <div class="f"><label>Account / IBAN<?= !empty($b['account_masked']) ? ' · on file ' . e($b['account_masked']) : '' ?></label><input name="b_account[]" value="<?= $bv('account') ?>" autocomplete="off" placeholder="<?= !empty($b['account_masked']) ? 'Leave empty to keep' : '' ?>"><input type="hidden" name="b_account_keep[]" value="<?= e($b['account_keep'] ?? '') ?>"></div>
+          <div class="f"><label>Account / IBAN<?= !empty($b['account_masked']) ? ' · on file ' . e($b['account_masked']) : '' ?></label><input name="b_account[]" value="<?= $bv('account') ?>" autocomplete="off" placeholder="<?= !empty($b['account_masked']) ? 'Leave empty to keep' : '' ?>"><input type="hidden" name="b_keep_id[]" value="<?= (int)($b['id'] ?? 0) ?>"></div>
           <div class="f"><label>Phone</label><input name="b_phone[]" value="<?= $bv('phone') ?>"></div>
         </div>
       <?php endforeach; ?>

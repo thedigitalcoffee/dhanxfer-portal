@@ -18,7 +18,6 @@ if ($c) {
     $v['id_masked'] = $reveal ? '' : mask($plainId);
     foreach ($benefs as &$bb) {
         $pa = dec($bb['account']);
-        $bb['account_keep'] = $reveal ? '' : (string)$bb['account'];
         $bb['account_masked'] = $reveal ? '' : mask($pa);
         $bb['account'] = $reveal ? $pa : '';
     }
@@ -28,7 +27,7 @@ $errors = [];
 $dupe = null;
 
 if ($_SERVER['REQUEST_METHOD'] === 'POST') {
-    [$nv, $benefs, $errors] = read_client_post();
+    [$nv, $benefs, $errors] = read_client_post($c ? (int)$c['id'] : 0);
     if ($nv['office'] === '') $errors[] = 'Choose the office.';
     $consent = post('consent') === '1';
     $agentId = $isAdmin ? ((int)post('agent_id') ?: null) : ($c ? $c['agent_id'] : (int)$u['id']);

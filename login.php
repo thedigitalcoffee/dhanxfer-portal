@@ -1,6 +1,7 @@
 <?php
 require __DIR__ . '/inc/bootstrap.php';
 require __DIR__ . '/inc/layout.php';
+require __DIR__ . '/inc/mfa.php';
 
 if (me()) redirect('/');
 $error = '';
@@ -27,6 +28,19 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                 $_SESSION['mfa_uid'] = (int)$u['id']; $_SESSION['mfa_at'] = time(); $_SESSION['mfa_next'] = $next;
                 redirect('/mfa.php');
             }
+            if (mfa_required($u)) {
+                // Role needs two-step login but it is not set up: no session, only the setup step.
+                if ($u['mfa_token_only']) {
+                    q('INSERT INTO login_attempts (ip, username) VALUES (?,?)', [$ip, $username]);
+                    $error = 'Two-step login must be set up through a link from the super admin. Ask them for a new link.';
+                    goto show;
+                }
+                session_regenerate_id(true);
+                unset($_SESSION['uid'], $_SESSION['sv']);
+                $_SESSION['enroll_uid'] = (int)$u['id']; $_SESSION['enroll_at'] = time();
+                audit_write((int)$u['id'], 'mfa_enroll_started', 'user', $u['id'], 'after password login', $ip);
+                redirect('/mfa_setup.php');
+            }
             session_regenerate_id(true);
             $_SESSION['uid'] = (int)$u['id'];
             $_SESSION['sv'] = (int)$u['session_version'];
@@ -42,6 +56,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
     }
 }
 
+show:
 page_head('Log in');
 ?>
 <div class="login card">

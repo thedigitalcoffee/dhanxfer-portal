@@ -17,7 +17,6 @@ $p = get('p', 'dashboard');
 if (!array_key_exists($p, $pages)) $p = 'dashboard';
 require_once __DIR__ . '/inc/mfa.php';
 if ($u['must_change_password'] && $p !== 'account') redirect('/?p=account&first=1');
-if (mfa_required($u) && !$u['mfa_enabled'] && $p !== 'mfa' && !$u['must_change_password']) { flash('Your role needs two-step login. Set it up to continue.', 'warn'); redirect('/?p=mfa'); }
 $need = $pages[$p];
 if ($need !== null) {
     $isAgentPage = $u['role'] === 'agent' && in_array($p, ['client_form', 'transfer_form', 'commission'], true);

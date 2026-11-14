@@ -3,6 +3,7 @@
 require __DIR__ . '/inc/bootstrap.php';
 require __DIR__ . '/inc/layout.php';
 require __DIR__ . '/inc/mfa.php';
+strict_csp();
 
 $uid = (int)($_SESSION['mfa_uid'] ?? 0);
 if (!$uid || time() - (int)($_SESSION['mfa_at'] ?? 0) > 300) { unset($_SESSION['mfa_uid']); flash('Please log in again.', 'warn'); redirect('/login.php'); }
@@ -12,8 +13,8 @@ $err = '';
 if ($_SERVER['REQUEST_METHOD'] === 'POST') {
     csrf_check();
     $key = 'mfa:' . $uid;
-    if ((int)val('SELECT COUNT(*) FROM login_attempts WHERE username=? AND at > (NOW() - INTERVAL 15 MINUTE)', [$key]) >= 6) {
-        $err = 'Too many wrong codes. Wait 15 minutes and log in again.';
+    if ($lockMsg = mfa_locked($uid)) {
+        $err = $lockMsg;
         unset($_SESSION['mfa_uid']);
     } elseif (mfa_check($user, post('code'))) {
         $next = $_SESSION['mfa_next'] ?? '/';
@@ -25,8 +26,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
         audit_write($uid, 'login', 'user', $uid, 'with two-step code', client_ip());
         redirect($user['must_change_password'] ? '/?p=account&first=1' : $next);
     } else {
-        q('INSERT INTO login_attempts (ip, username) VALUES (?,?)', [client_ip(), $key]);
-        audit_write($uid, 'mfa_failed', 'user', $uid, 'Wrong two-step code', client_ip());
+        mfa_fail($uid);
         $err = 'That code did not work. Use the newest code from your app.';
     }
 }

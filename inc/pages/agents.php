@@ -6,7 +6,7 @@ $secret = null; // a password to show once
 function manageable_roles(): array {
     $r = [];
     if (can('team.agents')) $r[] = 'agent';
-    if (can('team.staff')) { $r[] = 'staff'; $r[] = 'accountant'; $r[] = 'admin'; }
+    if (can('team.staff')) { $r[] = 'staff'; $r[] = 'accountant'; $r[] = 'auditor'; $r[] = 'compliance'; $r[] = 'admin'; }
     if (is_super()) $r[] = 'super_admin';
     return $r;
 }
@@ -28,7 +28,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
         elseif ($ref !== null && val('SELECT 1 FROM users WHERE ref_code=?', [$ref])) $err[] = 'That referral ID is already used.';
         if ($err) { foreach ($err as $x) flash($x, 'bad'); redirect('/?p=agents'); }
         // Nobody knows this random password: the person sets their own through the activation link.
-        q('INSERT INTO users (role,username,name,phone,email,office,ref_code,commission_note,password_hash,must_change_password,created_by) VALUES (?,?,?,?,?,?,?,?,?,0,?)',
+        q('INSERT INTO users (role,username,name,phone,email,office,ref_code,commission_note,password_hash,must_change_password,created_by,mfa_token_only) VALUES (?,?,?,?,?,?,?,?,?,0,?,' . (in_array($role, MFA_REQUIRED, true) ? 1 : 0) . ')',
             [$role, $username, $name, post('phone') ?: null, post('email') ?: null, in_array(post('office'), OFFICES, true) ? post('office') : null, $ref, mb_substr(post('commission_note'), 0, 250) ?: null, password_hash(bin2hex(random_bytes(32)), PASSWORD_DEFAULT), $u['id']]);
         $nid = (int)db()->lastInsertId();
         audit('create_user', 'user', $nid, "$role $username");
@@ -61,17 +61,21 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
     } elseif ($act === 'reset_link') {
         try { $link = make_reset_link((int)$target['id'], (int)$u['id'], $target['last_login'] ? 'reset' : 'activate'); }
         catch (RuntimeException $ex) { flash($ex->getMessage(), 'bad'); redirect('/?p=agents&id=' . $target['id']); }
-        q('UPDATE users SET session_version=session_version+1 WHERE id=?', [$target['id']]);
+        // The old password stops working now, and every open session ends.
+        q('UPDATE users SET password_hash=?, session_version=session_version+1 WHERE id=?', [password_hash(bin2hex(random_bytes(32)), PASSWORD_DEFAULT), $target['id']]);
         audit('reset_link', 'user', $target['id'], $target['username']);
         $_SESSION['show_link'] = ['name' => $target['name'], 'username' => $target['username'], 'link' => $link, 'purpose' => $target['last_login'] ? 'reset' : 'activate', 'ref' => $target['ref_code']];
     } elseif ($act === 'mfa_reset' && is_super()) {
-        q('UPDATE users SET mfa_enabled=0, mfa_secret=NULL, mfa_recovery=NULL, session_version=session_version+1 WHERE id=?', [$target['id']]);
+        q('UPDATE users SET mfa_enabled=0, mfa_secret=NULL, mfa_recovery=NULL, mfa_token_only=1, session_version=session_version+1 WHERE id=?', [$target['id']]);
         audit('mfa_reset', 'user', $target['id'], $target['username']);
-        flash('Two-step login was reset. ' . $target['name'] . ' sets it up again at the next login.');
+        try { $link = make_reset_link((int)$target['id'], (int)$u['id']); } catch (RuntimeException $ex) { flash($ex->getMessage(), 'bad'); redirect('/?p=agents&id=' . $target['id']); }
+        q('UPDATE users SET password_hash=? WHERE id=?', [password_hash(bin2hex(random_bytes(32)), PASSWORD_DEFAULT), $target['id']]);
+        $_SESSION['show_link'] = ['name' => $target['name'], 'username' => $target['username'], 'link' => $link, 'purpose' => 'reset', 'ref' => null];
+        flash('Two-step login was reset. Send ' . $target['name'] . ' this link: they set a new password and two-step login with it.');
     } elseif ($act === 'role') {
         $nr = post('role');
         if (!in_array($nr, manageable_roles(), true) || $target['role'] === 'agent' || $nr === 'agent') { flash('That role change is not allowed.', 'bad'); redirect('/?p=agents&id=' . $target['id']); }
-        q('UPDATE users SET role=?, session_version=session_version+1 WHERE id=?', [$nr, $target['id']]);
+        q('UPDATE users SET role=?, session_version=session_version+1, mfa_token_only=IF(mfa_enabled=0 AND ?, 1, mfa_token_only) WHERE id=?', [$nr, in_array($nr, MFA_REQUIRED, true) ? 1 : 0, $target['id']]);
         audit('change_role', 'user', $target['id'], $target['username'] . ': ' . $target['role'] . ' → ' . $nr);
         flash($target['name'] . ' is now ' . role_label($nr) . '.');
     } elseif ($act === 'disable') {

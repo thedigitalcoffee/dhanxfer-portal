@@ -1,7 +1,7 @@
 <?php
 defined('DX') or exit;
 
-if ($_SERVER['REQUEST_METHOD'] === 'POST') {
+if ($_SERVER['REQUEST_METHOD'] === 'POST' && post('act') !== 'reveal') {
     $s = one('SELECT * FROM submissions WHERE id=?', [(int)post('id')]);
     if (!$s || $s['status'] !== 'new') { flash('That form was already reviewed.', 'bad'); redirect('/?p=submissions'); }
     $act = post('act');
@@ -34,7 +34,7 @@ if (get('id') !== '') {
     $s = one('SELECT s.*, r.name reviewer FROM submissions s LEFT JOIN users r ON r.id=s.reviewed_by WHERE s.id=?', [(int)get('id')]);
     if (!$s) { flash('Form not found.', 'bad'); redirect('/?p=submissions'); }
     $d = json_decode((string)dec($s['data']), true) ?: [];
-    $reveal = can('pii.reveal') && get('reveal') === '1';
+    $reveal = can('pii.reveal') && $_SERVER['REQUEST_METHOD'] === 'POST' && post('act') === 'reveal';
     audit($reveal ? 'view_pii' : 'view_submission', 'submission', $s['id'], (string)$s['app_ref'] . ($reveal ? ' · full numbers shown' : ''));
     $digits = substr(preg_replace('/\D/', '', $s['phone']), -10);
     $dupe = $digits ? one("SELECT id, client_no, name FROM clients WHERE RIGHT(REGEXP_REPLACE(phone,'[^0-9]',''),10)=?", [$digits]) : null;
@@ -47,7 +47,7 @@ if (get('id') !== '') {
         <?= kv('Phone', $d['phone'] ?? '') . kv('WhatsApp', $d['whatsapp'] ?? '') . kv('Email', $d['email'] ?? '') . kv('Office', $d['office'] ?? '') . kv('Address', implode(', ', array_filter([$d['address'] ?? '', $d['city'] ?? '', $d['province'] ?? '', $d['postal'] ?? '', $d['country'] ?? '']))) ?>
         <?= kv('Date of birth', fdate($d['dob'] ?? '')) . kv('Nationality', $d['nationality'] ?? '') . kv('Occupation', $d['occupation'] ?? '') . kv('Employer', $d['employer'] ?? '') ?>
         <?= kv('ID', implode(' · ', array_filter([$d['id_type'] ?? '', $reveal ? ($d['id_number'] ?? '') : mask($d['id_number'] ?? '')]))) . kv('ID issued by', $d['id_country'] ?? '') . kv('ID expiry', fdate($d['id_expiry'] ?? '')) ?>
-        <?php if (can('pii.reveal') && !$reveal): ?><dt></dt><dd><a href="/?p=submissions&id=<?= (int)$s['id'] ?>&reveal=1">Show full numbers</a> <span class="tag">(logged)</span></dd><?php endif; ?>
+        <?php if (can('pii.reveal') && !$reveal): ?><dt></dt><dd><form method="post" class="inline"><?= csrf_field() ?><button class="linkbtn" name="act" value="reveal">Show full numbers</button></form> <span class="tag">(logged)</span></dd><?php endif; ?>
         <?php if ($s['id_file'] && (can('pii.reveal') || can('kyc.decide'))): ?><dt>ID document</dt><dd><a href="/file.php?f=<?= e($s['id_file']) ?>" target="_blank" rel="noopener">Open uploaded ID</a></dd><?php endif; ?>
         <?= kv('Purpose', $d['purpose'] ?? '') . kv('Source of funds', $d['source_of_funds'] ?? '') . kv('Monthly amount', $d['monthly_volume'] ?? '') . kv('Destination', $d['destination'] ?? '') . kv('Heard via', $d['referral'] ?? '') . kv('Referred by', $d['referred_by'] ?? '') . kv('Application reference', $s['app_ref']) . kv('Referral', $s['ref_code'] ? $s['ref_code'] . ($s['ref_verified'] ? ' · from the agent\'s signed link' : ' · typed by the client, not verified') : '') ?>
         <?php foreach ($d['beneficiaries'] ?? [] as $b) echo kv('Beneficiary', implode(' · ', array_filter([$b['name'] ?? '', ($b['relation'] ?? '') ? '(' . $b['relation'] . ')' : '', $b['country'] ?? '', $b['bank'] ?? '', $reveal ? ($b['account'] ?? '') : mask($b['account'] ?? ''), $b['phone'] ?? '']))); ?>

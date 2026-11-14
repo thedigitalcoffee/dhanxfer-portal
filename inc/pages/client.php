@@ -4,7 +4,7 @@ $isAdmin = is_staff();
 $c = one('SELECT c.*, a.name agent_name, a.ref_code FROM clients c LEFT JOIN users a ON a.id=c.agent_id WHERE c.id=?', [(int)get('id')]);
 if (!$c || !can_see_client($c)) { flash('Client not found.', 'bad'); redirect('/?p=clients'); }
 
-if ($_SERVER['REQUEST_METHOD'] === 'POST' && $isAdmin) {
+if ($_SERVER['REQUEST_METHOD'] === 'POST' && $isAdmin && post('act') !== 'reveal') {
     $act = post('act');
     if ($act === 'kyc' && can('kyc.decide') && in_array(post('kyc'), KYC, true)) {
         q('UPDATE clients SET kyc=?, updated_at=NOW() WHERE id=?', [post('kyc'), $c['id']]);
@@ -21,7 +21,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && $isAdmin) {
     redirect('/?p=client&id=' . $c['id']);
 }
 
-$reveal = can('pii.reveal') && get('reveal') === '1';
+$reveal = can('pii.reveal') && $_SERVER['REQUEST_METHOD'] === 'POST' && post('act') === 'reveal';
 audit($reveal ? 'view_pii' : 'view_client', 'client', $c['id'], $c['client_no'] . ($reveal ? ' · full ID and account numbers shown' : ''));
 $idPlain = dec($c['id_number']);
 $benefs = all('SELECT * FROM beneficiaries WHERE client_id=?', [$c['id']]);
@@ -51,7 +51,7 @@ page_head($c['name']); ?>
   <div>
     <div class="card"><h3 style="margin-bottom:10px">Contact</h3><dl class="kv"><?= kv('Phone', $c['phone']) . kv('WhatsApp', $c['whatsapp']) . kv('Email', $c['email']) . kv('Address', implode(', ', array_filter([$c['address'], $c['city'], $c['province'], $c['postal'], $c['country']]))) ?></dl></div>
     <div class="card"><h3 style="margin-bottom:10px">Identification</h3><dl class="kv"><?= kv('Date of birth', fdate($c['dob'])) . kv('Nationality', $c['nationality']) . kv('ID type', $c['id_type']) . kv('ID number', $reveal ? $idPlain : mask($idPlain)) . kv('Issued by', $c['id_country']) . kv('Expiry', fdate($c['id_expiry'])) . kv('Consent recorded', $c['consent'] ? 'Yes' : 'No') ?>
-      <?php if (can('pii.reveal') && !$reveal && ($idPlain || $c['id_file'])): ?><dt></dt><dd><a href="/?p=client&id=<?= (int)$c['id'] ?>&reveal=1">Show full numbers</a> <span class="tag">(this is logged)</span></dd><?php endif; ?>
+      <?php if (can('pii.reveal') && !$reveal && ($idPlain || $c['id_file'])): ?><dt></dt><dd><form method="post" class="inline"><?= csrf_field() ?><button class="linkbtn" name="act" value="reveal">Show full numbers</button></form> <span class="tag">(this is logged)</span></dd><?php endif; ?>
       <?php if ($c['id_file'] && (can('pii.reveal') || can('kyc.decide'))): ?><dt>ID document</dt><dd><a href="/file.php?f=<?= e($c['id_file']) ?>" target="_blank" rel="noopener">Open uploaded ID</a></dd><?php endif; ?></dl></div>
     <h2 style="margin:6px 0 10px">Transfers (<?= count($tx) ?>)</h2>
     <div class="tablewrap"><table><thead><tr><th>Date</th><th>Ref</th><th class="r">Sent</th><th class="r">Received</th><th>Status</th></tr></thead><tbody>
