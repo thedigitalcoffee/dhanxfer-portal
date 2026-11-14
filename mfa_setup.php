@@ -32,6 +32,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
         if ($claim && owner_claim($uid)) {
             q("UPDATE users SET role='super_admin' WHERE id=? AND role='admin'", [$uid]);
             audit_write($uid, 'super_admin_claimed', 'user', $uid, 'Verified with install key, password and new two-step login', client_ip());
+            notify('Security: super admin claimed', 'Login ID ' . (string)val('SELECT username FROM users WHERE id=?', [$uid]) . ' became super admin at ' . date('Y-m-d H:i') . '. If this was not you, act now.', 'security_alert');
             $user['role'] = 'super_admin';
         }
         audit_write($uid, 'login', 'user', $uid, 'with two-step code', client_ip());

@@ -36,7 +36,7 @@ CREATE TABLE IF NOT EXISTS clients (
   postal VARCHAR(20) NULL,
   country VARCHAR(80) NULL,
   id_type VARCHAR(40) NULL,
-  id_number VARCHAR(80) NULL,
+  id_number VARCHAR(255) NULL,
   id_country VARCHAR(80) NULL,
   id_expiry DATE NULL,
   id_file VARCHAR(120) NULL,
@@ -65,7 +65,7 @@ CREATE TABLE IF NOT EXISTS beneficiaries (
   relation VARCHAR(60) NULL,
   country VARCHAR(80) NULL,
   bank VARCHAR(120) NULL,
-  account VARCHAR(80) NULL,
+  account VARCHAR(255) NULL,
   phone VARCHAR(40) NULL,
   INDEX (client_id)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;

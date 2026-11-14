@@ -36,7 +36,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
         $tid = (int)db()->lastInsertId();
         apply_commission($tid);
         audit('create_transfer', 'transfer', $tid, $ref . ' ' . $status);
-        if (!$canDecide) notify('Transfer request ' . $ref . ' from ' . $u['name'], "{$u['name']} ({$u['ref_code']}) requested a transfer.\n\nClient: {$c['name']}\nAmount: " . money($amt, $v['send_currency']) . "\n\nAccept or reject it: https://portal.dhanxfer.com/?p=transfers&id=$tid");
+        if (!$canDecide) notify('Transfer request ' . $ref . ' from ' . $u['name'], "{$u['name']} ({$u['ref_code']}) requested a transfer of " . money($amt, $v['send_currency']) . ".\n\nAccept or reject it in the portal: " . app_link("/?p=transfers&id=$tid"), 'transfer_request');
         flash($canDecide ? "Transfer $ref saved." : "Transfer request $ref sent. An admin will accept or reject it.");
         redirect('/?p=transfers&id=' . $tid);
     }

@@ -43,6 +43,15 @@ class Browser {
         return $this->body;
     }
 }
+
+$SNAP = [];
+function snap(string $k, string $h): void { global $SNAP; $SNAP[$k] = $h; }
+function shell_exec_safe(string $cmd): ?string {
+    if ($cmd === '') return '';
+    if (function_exists('shell_exec') && !in_array('shell_exec', array_map('trim', explode(',', (string)ini_get('disable_functions'))), true)) { $r = shell_exec($cmd . ' 2>&1'); return $r === null || $r === false ? null : (string)$r; }
+    if (function_exists('proc_open')) { $p = proc_open($cmd, [1 => ['pipe', 'w'], 2 => ['pipe', 'w']], $pp); if (is_resource($p)) { $o = stream_get_contents($pp[1]) . stream_get_contents($pp[2]); proc_close($p); return $o; } }
+    return null;
+}
 function fresh_step_wait(): void { usleep((30 - time() % 30) * 1000000 + 200000); } // next code window, so codes are not reused
 
 // keep the database connection alive through the waits for a fresh code window
@@ -50,7 +59,7 @@ q('SET SESSION wait_timeout=900, interactive_timeout=900');
 function e2e_cleanup(): void {
     q("DELETE FROM submissions WHERE phone IN ('+1 416 555 7009','+1 416 555 7010')");
     q("DELETE FROM transfers WHERE ref_no='E2E-T2'"); q("DELETE FROM clients WHERE name IN ('E2E Client One','E2E Client Two')");
-    q("DELETE FROM users WHERE username='e2e.legacy'");
+    q("DELETE FROM users WHERE username IN ('e2e.legacy','e2e.staffx')"); q('DELETE FROM login_attempts');
     q("UPDATE users SET role='admin' WHERE username='test.admin'"); q("DELETE FROM settings WHERE k='owner_claim'");
 }
 e2e_cleanup(); // leftovers from an interrupted run
@@ -159,4 +168,95 @@ $pt = new Browser(); $pt->req('/register?ref=SA-9002&s=0000000000000000'); $pt->
 $sub2 = one("SELECT * FROM submissions WHERE phone='+1 416 555 7010'");
 ok($sub2 && (int)$sub2['ref_verified'] === 0 && $sub2['agent_id'] === null, 'a tampered or typed code is kept but never credited automatically');
 
+
+// ---- 7. public status page: guessing, limits, what it shows ----
+q('DELETE FROM login_attempts');
+q("INSERT INTO submissions (data, name, phone, app_ref, status) VALUES (?, 'E2E Status Person', '+1 416 555 7011', 'DXA-261114-E2E01', 'new')", [enc('{"name":"E2E Status Person"}')]);
+$msg = fn(Browser $b) => preg_match('/class="banner bad">([^<]+)</', $b->body, $m) ? $m[1] : '';
+$s1 = new Browser(); $s1->req('/status');
+$s1->req('/status', ['csrf' => $s1->csrf(), 'ref' => 'DXA-261114-NOPE1', 'last4' => '7011']); $unknown = $msg($s1);
+$s1->req('/status', ['csrf' => $s1->csrf(), 'ref' => 'DXA-261114-E2E01', 'last4' => '1111']); $wrong = $msg($s1);
+ok($unknown !== '' && $unknown === $wrong, 'unknown reference and wrong phone digits give the identical answer (no way to tell which references exist)');
+ok(!str_contains($s1->body, 'E2E Status Person') && !str_contains($s1->body, '7011'), 'failed lookup shows no name or phone');
+for ($i = 0; $i < 3; $i++) $s1->req('/status', ['csrf' => $s1->csrf(), 'ref' => 'DXA-261114-E2E01', 'last4' => sprintf('%04d', 2000 + $i)]);
+q("DELETE FROM login_attempts WHERE username='status-check'"); // fresh connection budget, same reference
+$s1->req('/status', ['csrf' => $s1->csrf(), 'ref' => 'DXA-261114-E2E01', 'last4' => '3000']); // 5th wrong try for this reference
+$s1->req('/status', ['csrf' => $s1->csrf(), 'ref' => 'DXA-261114-E2E01', 'last4' => '7011']);
+ok($msg($s1) === $wrong && !str_contains($s1->body, 'Received'), 'after 5 wrong tries the reference stops answering, even with the right digits (from any connection)');
+ok((int)val("SELECT COUNT(*) FROM audit WHERE action='status_ref_locked'") >= 1, 'the paused reference is recorded in the activity log');
+q("DELETE FROM login_attempts WHERE username='status-check'");
+for ($i = 0; $i < 10; $i++) $s1->req('/status', ['csrf' => $s1->csrf(), 'ref' => sprintf('DXA-261114-X%04d', $i), 'last4' => '1234']);
+$s1->req('/status', ['csrf' => $s1->csrf(), 'ref' => 'DXA-261114-Y0000', 'last4' => '1234']);
+ok(str_contains($s1->body, 'Too many checks'), 'one connection is limited to 10 lookups per 15 minutes');
+$sx = new Browser(); $sx->req('/status');
+$ch = curl_init($BASE . '/status'); curl_setopt_array($ch, [CURLOPT_RETURNTRANSFER => true, CURLOPT_POST => true, CURLOPT_COOKIEFILE => $sx->jar, CURLOPT_COOKIEJAR => $sx->jar, CURLOPT_HTTPHEADER => ['X-Forwarded-For: 198.51.100.7', 'X-Real-IP: 198.51.100.7', 'Client-IP: 198.51.100.7'], CURLOPT_POSTFIELDS => http_build_query(['csrf' => $sx->csrf(), 'ref' => 'DXA-261114-Z0000', 'last4' => '1234'])]);
+$xb = (string)curl_exec($ch); curl_close($ch);
+ok(str_contains($xb, 'Too many checks'), 'a faked forwarding header does not reset the limit');
+$ch = curl_init($BASE . '/status'); curl_setopt_array($ch, [CURLOPT_RETURNTRANSFER => true, CURLOPT_HEADER => true, CURLOPT_NOBODY => true]); $hdrs = (string)curl_exec($ch); curl_close($ch);
+ok(stripos($hdrs, 'cache-control: private, no-store') !== false && stripos($hdrs, 'x-frame-options: deny') !== false, 'status page is not cached and cannot be framed');
+$sg = new Browser(); $sg->req('/status?ref=DXA-261114-E2E01&last4=7011'); ok(!str_contains($sg->body, 'Received'), 'lookups only work by form post (nothing in links or browser history)');
+q('DELETE FROM login_attempts'); q("DELETE FROM submissions WHERE app_ref='DXA-261114-E2E01'");
+
+// ---- 8. owner cannot be locked out by strangers; super admin stays reachable ----
+// test.admin is super admin now (claimed in section 5). Strangers' wrong passwords from other addresses:
+foreach (['test.admin', 'test.staff'] as $who) for ($i = 0; $i < 10; $i++) q("INSERT INTO login_attempts (ip, username) VALUES ('203.0.113.9', ?)", [$who]);
+fresh_step_wait();
+$sa = new Browser(); $sa->login('test.admin');
+$sa->req('/', null);
+ok(str_contains($sa->body, 'Owner overview') || str_contains($sa->body, 'Log out'), "10 wrong passwords from a stranger's address do not lock out the owner (two-step login protects the account)");
+$sf = new Browser(); $sf->login('test.staff');
+ok(str_contains($sf->body, 'Too many wrong attempts'), 'an account without two-step login is still locked after 10 wrong passwords');
+q("DELETE FROM login_attempts WHERE ip='203.0.113.9'");
+$sa->post('/?p=agents', ['id' => (int)val("SELECT id FROM users WHERE username='test.admin'"), 'act' => 'disable']);
+ok((int)val("SELECT active FROM users WHERE username='test.admin'") === 1, 'super admin cannot switch off their own account');
+$sa->post('/?p=agents', ['id' => (int)val("SELECT id FROM users WHERE username='test.admin'"), 'act' => 'mfa_reset']);
+ok((int)val("SELECT mfa_enabled FROM users WHERE username='test.admin'") === 1, 'super admin cannot reset their own two-step login from the panel');
+$co2 = new Browser(); fresh_step_wait(); $co2->login('test.compliance');
+$co2->post('/?p=agents', ['id' => (int)val("SELECT id FROM users WHERE username='test.admin'"), 'act' => 'disable']);
+ok((int)val("SELECT active FROM users WHERE username='test.admin'") === 1, 'a compliance officer cannot switch off the super admin');
+$cl3 = new Browser(); $cl3->req('/install.php', null, false); ok($cl3->code === 404, 'install page stays closed while a working super admin exists');
+
+// ---- 9. emergency recovery from the server (lost phone and recovery codes) ----
+$sid = (int)val("SELECT id FROM users WHERE username='test.admin'");
+$oldPw = $T['test.admin']['password']; $oldSecret = $T['test.admin']['mfa_secret'];
+$outp = shell_exec_safe(PHP_BINARY . ' ' . escapeshellarg(dirname(__DIR__) . '/tools/recover_admin.php') . ' test.admin');
+if ($outp === null) { ok(false, 'server recovery tool could not be started from the test (shell disabled)'); }
+else {
+    ok(preg_match('#/reset\.php\?t=[a-f0-9]{48}#', $outp, $lm) === 1, 'server recovery tool prints a one-time link');
+    ok((int)val('SELECT mfa_enabled FROM users WHERE id=?', [$sid]) === 0 && (int)val("SELECT COUNT(*) FROM audit WHERE action='break_glass'") >= 1, 'recovery clears the lost authenticator and is logged');
+    $rv = new Browser(); $rv->login('test.admin', $oldPw, false); ok(str_contains($rv->body, 'Wrong ID or password'), 'old password stops working after recovery');
+    $rl = new Browser(); $rl->req($lm[0]); $rl->req($lm[0], ['csrf' => $rl->csrf(), 'password' => 'Recovered-Pass-789', 'password2' => 'Recovered-Pass-789']);
+    $sec = preg_match('/letter-spacing:\.08em;font-size:17px">([A-Z2-7 ]+)</', $rl->body, $sm) ? str_replace(' ', '', $sm[1]) : '';
+    ok($sec !== '', 'recovery link leads to new two-step setup');
+    $rl->req('/mfa_setup.php', ['csrf' => $rl->csrf(), 'code' => totp_code($sec, intdiv(time(), 30))]);
+    ok((int)val('SELECT mfa_enabled FROM users WHERE id=?', [$sid]) === 1 && val('SELECT role FROM users WHERE id=?', [$sid]) === 'super_admin', 'owner is back in with a new authenticator and is still super admin');
+    fresh_step_wait();
+    $T['test.admin']['password'] = 'Recovered-Pass-789'; $T['test.admin']['mfa_secret'] = $sec;
+    $rb3 = new Browser(); $rb3->login('test.admin'); $rb3->req('/');
+    ok(str_contains($rb3->body, 'Owner overview'), 'owner logs in normally after recovery');
+    snap('super_overview', $rb3->body);
+    // put the staging test account back as it was
+    q('UPDATE users SET password_hash=?, mfa_secret=?, mfa_enabled=1, mfa_token_only=0, mfa_last_step=NULL WHERE id=?', [password_hash($oldPw, PASSWORD_DEFAULT), enc($oldSecret), $sid]);
+    $T['test.admin']['password'] = $oldPw; $T['test.admin']['mfa_secret'] = $oldSecret;
+}
+q("UPDATE users SET role='admin' WHERE id=?", [$sid]); q("DELETE FROM settings WHERE k='owner_claim'");
+q("INSERT INTO users (role, username, name, password_hash) VALUES ('admin','e2e.staffx','E2E Stuck Claim','x')"); $stuck = (int)db()->lastInsertId();
+owner_claim($stuck); // an admin started the claim and never finished
+$o2 = shell_exec_safe(PHP_BINARY . ' ' . escapeshellarg(dirname(__DIR__) . '/tools/recover_admin.php') . ' --clear-claim');
+ok($o2 !== null && str_contains($o2, 'Cleared') && val("SELECT v FROM settings WHERE k='owner_claim'") === null && val('SELECT role FROM users WHERE id=?', [$stuck]) === 'admin', 'a half-finished claim can be cleared from the server without promoting anyone');
+
+// ---- 10. phone-size layout snapshots (synthetic staging data) ----
+$m1 = new Browser(); $m1->login('test.agent1');
+foreach (['agent_home' => '/', 'agent_clients' => '/?p=clients', 'agent_new_client' => '/?p=client_form', 'agent_rates' => '/?p=rates', 'agent_transfers' => '/?p=transfers', 'agent_commission' => '/?p=commission', 'agent_transfer_new' => '/?p=transfer_form'] as $k => $pth) { $m1->req($pth); snap($k, $m1->body); }
+$m2 = new Browser(); $m2->req('/register?ref=SA-9001&s=' . ref_sig('SA-9001')); snap('public_register', $m2->body);
+$m2->req('/status'); snap('public_status', $m2->body); $m2->req('/login.php'); snap('login', $m2->body);
+$m3 = new Browser(); $m3->login('test.auditor'); $m3->req('/?p=clients'); snap('auditor_clients', $m3->body); $m3->req('/?p=transfers'); snap('auditor_transfers', $m3->body);
+$bundle = '';
+foreach ($SNAP as $k => $h) {
+    $h = preg_replace('/name="csrf" value="[a-f0-9]+"/', 'name="csrf" value="x"', $h);
+    $h = preg_replace('/>\s+</', '><', preg_replace('/[ \t]+/', ' ', $h));
+    $bundle .= "=====PAGE $k=====\n" . trim($h) . "\n";
+}
+@file_put_contents(data_dir() . '/snapshots.txt', $bundle);
+ok(strlen($bundle) > 1000, 'phone layout snapshots saved (' . count($SNAP) . ' pages, ' . strlen($bundle) . ' bytes)');
 exit($fail ? 1 : 0);

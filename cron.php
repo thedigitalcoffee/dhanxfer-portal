@@ -14,7 +14,7 @@ if (setting('last_market_date') !== today()) {
 // Daily activity-log checkpoint kept outside the database (file + email), so cut-off rows are detected.
 if (setting('last_anchor_date') !== today()) {
     set_setting('last_anchor_date', today());
-    if ($line = audit_write_anchor()) notify('DhanXfer activity log checkpoint ' . today(), "Keep this email. It lets the portal prove later that no activity-log rows were removed.\n\n$line");
+    if ($line = audit_write_anchor()) notify('DhanXfer activity log checkpoint ' . today(), "Keep this email. It lets the portal prove later that no activity-log rows were removed.\n\n$line", 'audit_checkpoint');
 }
 if (setting('rates_on', '1') !== '1' || !tg_token()) exit(0);
 $sendAt = setting('send_time', '09:00');

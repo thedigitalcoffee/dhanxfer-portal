@@ -73,6 +73,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                 if (!owner_claim((int)$u['id'])) { $err[] = 'Another admin has already claimed super admin.'; goto render; }
                 q("UPDATE users SET role='super_admin', session_version=session_version+1 WHERE id=? AND role='admin'", [$u['id']]);
                 audit_write((int)$u['id'], 'super_admin_claimed', 'user', $u['id'], 'Verified with install key, password and two-step code', client_ip());
+            notify('Security: super admin claimed', 'Login ID ' . (string)val('SELECT username FROM users WHERE id=?', [(int)$u['id']]) . ' became super admin at ' . date('Y-m-d H:i') . '. If this was not you, act now.', 'security_alert');
                 flash('You are now the super admin. Log in again.');
                 redirect('/login.php');
             }

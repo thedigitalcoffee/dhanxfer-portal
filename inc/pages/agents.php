@@ -11,6 +11,11 @@ function manageable_roles(): array {
     return $r;
 }
 function can_manage(array $target): bool { return in_array($target['role'], manageable_roles(), true); }
+function link_message(array $l): string {
+    return ($l['purpose'] ?? '') === 'activate'
+        ? "Welcome to DhanXfer, {$l['name']}! Open this link to set your password and activate your portal account. It works once and expires in 72 hours:\n{$l['link']}\nYour login ID: {$l['username']}" . (!empty($l['ref']) ? "\nYour agent code: {$l['ref']}" : '')
+        : "Hi {$l['name']}, use this link to set a new password for the DhanXfer portal. It works once and expires in 24 hours:\n{$l['link']}\nYour login ID: {$l['username']}";
+}
 
 if ($_SERVER['REQUEST_METHOD'] === 'POST') {
     $act = post('act');
@@ -41,6 +46,14 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
     if (!$self && !can_manage($target)) { flash('Your role cannot change this person.', 'bad'); redirect('/?p=agents'); }
     if ($self && !in_array($act, ['save'], true)) { flash('Change your own password under My account.', 'bad'); redirect('/?p=agents&id=' . $target['id']); }
     if ((int)$target['id'] === (int)$u['id'] && in_array($act, ['disable', 'role'], true)) { flash('You cannot switch off or change your own account.', 'bad'); redirect('/?p=agents&id=' . $target['id']); }
+    // Never leave the business without a working super admin. Checks run one at a time (lock held until the
+    // request ends), so two super admins switching each other off at the same moment cannot both succeed.
+    if ($target['role'] === 'super_admin' && in_array($act, ['disable', 'role', 'mfa_reset', 'reset_link'], true) && !($act === 'role' && post('role') === 'super_admin')) {
+        val("SELECT GET_LOCK('dx_supers', 10)");
+        if ((int)val("SELECT COUNT(*) FROM users WHERE role='super_admin' AND active=1 AND mfa_enabled=1 AND id<>?", [$target['id']]) < 1) {
+            flash('At least one other super admin with two-step login must stay active, so this change is not allowed.', 'bad'); redirect('/?p=agents&id=' . $target['id']);
+        }
+    }
     if ($act === 'commission' && $target['role'] === 'agent' && can('commission.set')) {
         $changes = [];
         foreach (rate_pairs(false) as $pp) {
@@ -64,10 +77,20 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
         // The old password stops working now, and every open session ends.
         q('UPDATE users SET password_hash=?, session_version=session_version+1 WHERE id=?', [password_hash(bin2hex(random_bytes(32)), PASSWORD_DEFAULT), $target['id']]);
         audit('reset_link', 'user', $target['id'], $target['username']);
+        notify_user((int)$target['id'], 'Security notice: your DhanXfer password was reset', "Hi {$target['name']},\n\nA DhanXfer admin has reset the password for your portal account ({$target['username']}). Your old password no longer works. You will get a one-time link to choose a new one.\n\nIf you did not expect this, contact DhanXfer right away.");
         $_SESSION['show_link'] = ['name' => $target['name'], 'username' => $target['username'], 'link' => $link, 'purpose' => $target['last_login'] ? 'reset' : 'activate', 'ref' => $target['ref_code']];
+    } elseif ($act === 'email_link') {
+        $ml = $_SESSION['mail_link'] ?? null; unset($_SESSION['mail_link']);
+        if (!$ml || (int)$ml['uid'] !== (int)$target['id'] || time() - (int)$ml['at'] > 900 || !$target['email']) { flash('Make a new link first, then email it right away (the person needs an email address on file).', 'bad'); redirect('/?p=agents&id=' . $target['id']); }
+        $isAct = $ml['purpose'] === 'activate';
+        $ok = send_mail($target['email'], $isAct ? 'Activate your DhanXfer portal account' : 'Your DhanXfer password reset link', link_message($ml), $isAct ? 'activation_link' : 'reset_link');
+        audit('email_link', 'user', $target['id'], $target['username'] . ($ok ? ': sent' : ': failed'));
+        flash($ok ? 'Emailed the link to ' . $target['email'] . '.' : 'The email could not be sent. Share the link another way.', $ok ? 'ok' : 'bad');
     } elseif ($act === 'mfa_reset' && is_super()) {
         q('UPDATE users SET mfa_enabled=0, mfa_secret=NULL, mfa_recovery=NULL, mfa_token_only=1, session_version=session_version+1 WHERE id=?', [$target['id']]);
         audit('mfa_reset', 'user', $target['id'], $target['username']);
+        notify_user((int)$target['id'], 'Security notice: two-step login was reset on your account', "Hi {$target['name']},\n\nThe DhanXfer super admin has reset two-step login for your portal account ({$target['username']}). Your old authenticator codes no longer work. You will get a one-time link to set a new password and two-step login.\n\nIf you did not expect this, contact DhanXfer right away.");
+        notify('Security: two-step login reset for ' . $target['username'], 'Two-step login was reset for ' . $target['username'] . ' by ' . $u['username'] . '.', 'security_alert');
         try { $link = make_reset_link((int)$target['id'], (int)$u['id']); } catch (RuntimeException $ex) { flash($ex->getMessage(), 'bad'); redirect('/?p=agents&id=' . $target['id']); }
         q('UPDATE users SET password_hash=? WHERE id=?', [password_hash(bin2hex(random_bytes(32)), PASSWORD_DEFAULT), $target['id']]);
         $_SESSION['show_link'] = ['name' => $target['name'], 'username' => $target['username'], 'link' => $link, 'purpose' => 'reset', 'ref' => null];
@@ -92,7 +115,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
 $base = rtrim($CONFIG['app_url'], '/');
 if (isset($_SESSION['show_secret'])) { $secret = $_SESSION['show_secret']; unset($_SESSION['show_secret']); }
 $showLink = null;
-if (isset($_SESSION['show_link'])) { $showLink = $_SESSION['show_link']; unset($_SESSION['show_link']); }
+if (isset($_SESSION['show_link'])) { $showLink = $_SESSION['show_link']; unset($_SESSION['show_link']); $_SESSION['mail_link'] = $showLink + ['at' => time(), 'uid' => (int)get('id')]; }
 
 if (get('id') !== '') {
     $a = one('SELECT * FROM users WHERE id=?', [(int)get('id')]);
@@ -105,15 +128,15 @@ if (get('id') !== '') {
       <div class="row" style="margin-top:6px"><?= $a['active'] ? '<span class="pill p-ok">Active</span>' : '<span class="pill p-bad">Switched off</span>' ?><?php if ($isAgent): ?><span class="pill p-gold"><?= e($a['ref_code']) ?></span><?php endif; ?></div></div>
       <a class="btn" href="/?p=agents">Back to team</a></div>
     <?php if ($showLink): $act = ($showLink['purpose'] ?? '') === 'activate';
-      $lmsg = $act ? "Welcome to DhanXfer, {$showLink['name']}! Open this link to set your password and activate your portal account. It works once and expires in 72 hours:\n{$showLink['link']}\nYour login ID: {$showLink['username']}" . (!empty($showLink['ref']) ? "\nYour agent code: {$showLink['ref']}" : '')
-                   : "Hi {$showLink['name']}, use this link to set a new password for the DhanXfer portal. It works once and expires in 24 hours:\n{$showLink['link']}\nYour login ID: {$showLink['username']}"; ?>
+      $lmsg = link_message($showLink); ?>
       <div class="card" style="border-color:var(--gold)">
         <h2 style="margin-bottom:8px"><?= $act ? 'Activation link' : 'Password reset link' ?> for <?= e($showLink['name']) ?></h2>
         <p class="tag" style="margin-top:0">Send this privately. It works one time only and expires in <?= $act ? '72' : '24' ?> hours. They choose their own password; nobody else ever sees it.</p>
         <div class="secret"><?= e($showLink['link']) ?></div>
         <div class="row" style="margin-top:10px"><button type="button" class="btn gold" data-share="<?= e($showLink['link']) ?>" data-share-text="<?= e($lmsg) ?>">Share</button>
           <a class="btn" href="https://wa.me/<?= e(preg_replace('/\D/', '', (string)$a['phone'])) ?>?text=<?= e(rawurlencode($lmsg)) ?>" target="_blank" rel="noopener">Send on WhatsApp</a>
-          <button type="button" class="btn" data-copy="<?= e($lmsg) ?>">Copy message</button></div>
+          <button type="button" class="btn" data-copy="<?= e($lmsg) ?>">Copy message</button>
+          <?php if ($a['email']): ?><form method="post" style="display:inline"><?= csrf_field() ?><input type="hidden" name="act" value="email_link"><input type="hidden" name="id" value="<?= (int)$a['id'] ?>"><button class="btn">Email to <?= e($a['email']) ?></button></form><?php endif; ?></div>
       </div>
     <?php endif; ?>
     <div class="grid2">

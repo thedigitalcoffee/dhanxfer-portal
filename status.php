@@ -15,7 +15,16 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
         $ref = strtoupper(trim(post('ref')));
         $last4 = preg_replace('/\D/', '', post('last4'));
         $s = preg_match('/^DXA-[0-9A-Z-]{4,20}$/', $ref) && strlen($last4) === 4 ? one('SELECT status, phone, created_at, client_id FROM submissions WHERE app_ref=?', [$ref]) : null;
-        if ($s && substr(preg_replace('/\D/', '', $s['phone']), -4) === $last4) {
+        // A reference stops answering after 5 wrong phone-digit tries in a day, from any connection,
+        // so the 4 digits cannot be guessed by spreading tries over many addresses.
+        $refKey = 'status-ref:' . substr(hash('sha256', $ref), 0, 32);
+        $refLocked = $s && (int)val('SELECT COUNT(*) FROM login_attempts WHERE username=? AND at > (NOW() - INTERVAL 1 DAY)', [$refKey]) >= 5;
+        $match = $s && !$refLocked && hash_equals(substr(preg_replace('/\D/', '', $s['phone']), -4), $last4);
+        if ($s && !$match && !$refLocked) {
+            q('INSERT INTO login_attempts (ip, username) VALUES (?, ?)', [$ip, $refKey]);
+            if ((int)val('SELECT COUNT(*) FROM login_attempts WHERE username=? AND at > (NOW() - INTERVAL 1 DAY)', [$refKey]) === 5) audit_write(null, 'status_ref_locked', 'submission', null, 'Status lookups paused for one reference', $ip);
+        }
+        if ($match) {
             $kycDone = $s['client_id'] ? val('SELECT kyc FROM clients WHERE id=?', [$s['client_id']]) === 'Verified' : false;
             $result = match ($s['status']) {
                 'new' => ['Received', 'Our team is reviewing your details. We will contact you on WhatsApp.', 'p-warn'],

@@ -39,7 +39,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
             q('INSERT INTO submissions (data,name,phone,ref_code,ref_verified,agent_id,id_file,ip,app_ref) VALUES (?,?,?,?,?,?,?,?,?)',
                 [enc(json_encode($data, JSON_UNESCAPED_UNICODE)), $v['name'], $v['phone'], $v['ref_code'] ?: null, $agent ? 1 : 0, $agent['id'] ?? null, $file, client_ip(), $ref]);
             audit_write(null, 'public_registration', 'submission', (int)db()->lastInsertId(), $ref . ($v['ref_code'] ? ' · referral ' . $v['ref_code'] . ($agent ? ' (verified link)' : ' (typed, not verified)') : ''), client_ip());
-            notify('New client registration ' . $ref, "A new client registration was submitted.\n\nReference: $ref\nOffice: {$v['office']}\n\nReview it in the portal: https://portal.dhanxfer.com/?p=submissions");
+            notify('New client registration ' . $ref, "A new client registration was submitted.\n\nReference: $ref\nOffice: {$v['office']}\n\nReview it in the portal: " . app_link('/?p=submissions'), 'new_registration');
             unset($_SESSION['ref_hint']);
             $done = $ref;
         }
@@ -53,7 +53,7 @@ if ($done): ?>
     <p class="muted" style="max-width:52ch;margin:12px auto 16px">Your details have reached the DhanXfer team. We will contact you on WhatsApp shortly. Please keep your photo ID ready for your first transfer.</p>
     <div class="tag" style="text-transform:uppercase;letter-spacing:.07em">Your application reference</div>
     <div class="secret" style="display:inline-block;margin:8px 0 6px;font-size:20px"><?= e($done) ?></div>
-    <p class="tag">Save it. You can check your application at <a href="/status">portal.dhanxfer.com/status</a> with this reference and your phone number.</p>
+    <p class="tag">Save it. You can check your application at <a href="/status"><?= e(preg_replace('#^https?://#', '', app_link('/status'))) ?></a> with this reference and your phone number.</p>
     <p>WhatsApp: <strong>+1 (942)-6600-0600</strong> · <a href="https://www.dhanxfer.com">www.dhanxfer.com</a></p>
   </div>
 <?php else: ?>

@@ -21,6 +21,7 @@ if ($valid && $_SERVER['REQUEST_METHOD'] === 'POST') {
             q('UPDATE users SET password_hash=?, must_change_password=0, session_version=session_version+1 WHERE id=?', [password_hash($p1, PASSWORD_DEFAULT), $row['user_id']]);
             audit_write((int)$row['user_id'], $row['purpose'] === 'activate' ? 'account_activated' : 'reset_link_used', 'user', $row['user_id'], $row['purpose'] === 'activate' ? 'Account activated' : 'Password set with reset link', client_ip());
             $usr = one('SELECT * FROM users WHERE id=?', [$row['user_id']]);
+            notify_user((int)$row['user_id'], $row['purpose'] === 'activate' ? 'Your DhanXfer portal account is active' : 'Security notice: your DhanXfer password was changed', "Hi {$row['name']},\n\n" . ($row['purpose'] === 'activate' ? 'Your DhanXfer portal account (' . $row['username'] . ') was activated just now.' : 'The password for your DhanXfer portal account (' . $row['username'] . ') was changed just now with a one-time link.') . "\n\nIf this was not you, contact DhanXfer right away.");
             if ($usr && in_array($usr['role'], MFA_REQUIRED, true) && !$usr['mfa_enabled']) {
                 // The person just proved they hold the admin's link: let them set up two-step login now.
                 session_regenerate_id(true);

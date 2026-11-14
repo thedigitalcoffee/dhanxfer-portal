@@ -14,8 +14,19 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
     $username = mb_strtolower(post('username'));
     $password = $_POST['password'] ?? '';
     $ip = client_ip();
-    $fails = (int)val("SELECT COUNT(*) FROM login_attempts WHERE (ip=? OR username=?) AND username NOT LIKE 'mfa:%' AND username<>'status-check' AND at > (NOW() - INTERVAL 15 MINUTE)", [$ip, $username]);
-    if ($fails >= 6) {
+    $win = "username NOT LIKE 'mfa:%' AND username NOT LIKE 'status-ref:%' AND username NOT IN ('status-check','install') AND at > (NOW() - INTERVAL 15 MINUTE)";
+    $ipFails = (int)val("SELECT COUNT(*) FROM login_attempts WHERE ip=? AND $win", [$ip]);
+    $pairFails = (int)val("SELECT COUNT(*) FROM login_attempts WHERE ip=? AND username=? AND $win", [$ip, $username]);
+    $userFails = (int)val("SELECT COUNT(*) FROM login_attempts WHERE username=? AND $win", [$username]);
+    $acct = one('SELECT id, mfa_enabled FROM users WHERE username=?', [$username]);
+    // Accounts with two-step login are not locked by failures from other connections: the code still protects them,
+    // and a stranger must not be able to lock the owner out by typing wrong passwords. We alert instead.
+    $userLock = $userFails >= 6 && !($acct && (int)$acct['mfa_enabled'] === 1);
+    if ($acct && (int)$acct['mfa_enabled'] === 1 && $userFails === 20) {
+        audit_write((int)$acct['id'], 'login_alert', 'user', $acct['id'], '20 wrong passwords in 15 minutes', $ip);
+        notify('Security alert: many wrong passwords', "Login ID $username had 20 wrong passwords in 15 minutes. Two-step login still protects the account.", 'security_alert');
+    }
+    if ($ipFails >= 10 || $pairFails >= 6 || $userLock) {
         $error = 'Too many wrong attempts. Wait 15 minutes and try again, or ask an admin to reset your password.';
     } else {
         $u = one('SELECT * FROM users WHERE username=?', [$username]);

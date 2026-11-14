@@ -22,6 +22,12 @@ function is_https(): bool {
         || (string)($_SERVER['SERVER_PORT'] ?? '') === '443';
 }
 
+/* ---------- maintenance window (set 'maintenance' => true in dx-config.php during a cutover) ---------- */
+if (!empty($CONFIG['maintenance']) && PHP_SAPI !== 'cli') {
+    http_response_code(503); header('Retry-After: 1800'); header('Content-Type: text/html; charset=utf-8'); header('Cache-Control: no-store');
+    exit('<!doctype html><meta name="viewport" content="width=device-width,initial-scale=1"><title>DhanXfer</title><div style="font-family:system-ui;max-width:420px;margin:15vh auto;padding:0 20px;text-align:center"><h1>Back soon</h1><p>The DhanXfer portal is being upgraded. Please try again in about 30 minutes.</p><p>WhatsApp +1 (942)-6600-0600</p></div>');
+}
+
 /* ---------- security headers ---------- */
 header('Cache-Control: private, no-store, max-age=0');
 header('X-Frame-Options: DENY');
@@ -59,17 +65,28 @@ function db(): PDO {
             PDO::ATTR_EMULATE_PREPARES => false,
         ]);
         $pdo->exec("SET time_zone = '" . (new DateTime())->format('P') . "'");
-        if (!defined('DX_NO_AUTO_MIGRATE')) migrate();
+        // Any truncation or bad value is an error, never silently stored
+        $modes = array_filter(explode(',', (string)$pdo->query('SELECT @@SESSION.sql_mode')->fetchColumn()));
+        if (!in_array('STRICT_ALL_TABLES', $modes, true)) { $modes[] = 'STRICT_ALL_TABLES'; $pdo->exec("SET SESSION sql_mode = '" . implode(',', $modes) . "'"); }
+        if (!defined('DX_NO_AUTO_MIGRATE') && ($CONFIG['auto_migrate'] ?? true)) migrate();
     }
     return $pdo;
 }
 
-const SCHEMA_VERSION = '5';
+const SCHEMA_VERSION = '6';
 /** Creates missing tables/columns after an upload of a newer version. Runs one cheap query per request. */
 function migrate(): void {
     $ver = null;
     try { $ver = db()->query("SELECT v FROM settings WHERE k='schema_version'")->fetchColumn(); } catch (Throwable $e) { $ver = null; }
     if ($ver === SCHEMA_VERSION) return;
+    // One upgrade at a time: a second request waits, then finds the work done.
+    if ((int)db()->query("SELECT GET_LOCK('dx_migrate', 60)")->fetchColumn() !== 1) throw new RuntimeException('Another upgrade is running. Try again in a minute.');
+    try { migrate_locked($ver === false ? null : $ver); } finally { db()->query("SELECT RELEASE_LOCK('dx_migrate')"); }
+}
+function migrate_locked(?string $ver): void {
+    $ver2 = db()->query("SELECT COUNT(*) FROM information_schema.TABLES WHERE TABLE_SCHEMA=DATABASE() AND TABLE_NAME='settings'")->fetchColumn()
+        ? db()->query("SELECT v FROM settings WHERE k='schema_version'")->fetchColumn() : false;
+    if ($ver2 === SCHEMA_VERSION) return;
     foreach (array_filter(array_map('trim', explode(';', file_get_contents(__DIR__ . '/schema.sql')))) as $sql) db()->exec($sql);
     $cols = [
         ['users', 'telegram_chat_id', 'VARCHAR(40) NULL'],
@@ -119,20 +136,38 @@ function migrate(): void {
         foreach (['compliance', 'auditor'] as $role) foreach (DEFAULT_PERMS[$role] as $perm) $ins->execute([$role, $perm]);
         $ins->execute(['super_admin', 'pii.reveal']);
     }
+    // v6: encrypted values are longer than the plain text, so these columns must be wide enough first
+    // (an 80-character column could not hold a long IBAN or ID number once encrypted).
+    foreach ([['clients', 'id_number', 'VARCHAR(255) NULL'], ['beneficiaries', 'account', 'VARCHAR(255) NULL'], ['users', 'mfa_secret', 'VARCHAR(255) NULL']] as [$t, $c, $def]) {
+        $len = db()->prepare('SELECT CHARACTER_MAXIMUM_LENGTH FROM information_schema.COLUMNS WHERE TABLE_SCHEMA=DATABASE() AND TABLE_NAME=? AND COLUMN_NAME=?');
+        $len->execute([$t, $c]);
+        $n = $len->fetchColumn();
+        if ($n !== false && (int)$n < 255) db()->exec("ALTER TABLE `$t` MODIFY `$c` $def");
+    }
     // v4: encrypt ID and account numbers that were saved before encryption existed.
     // Without a key the version is not recorded, so this runs again until the key is in place.
     if (!enc_ready()) return;
-    {
-        foreach (db()->query("SELECT id, id_number FROM clients WHERE id_number IS NOT NULL AND id_number<>'' AND id_number NOT LIKE 'enc:%'")->fetchAll() as $r)
-            db()->prepare('UPDATE clients SET id_number=?, id_number_hash=? WHERE id=?')->execute([enc($r['id_number']), id_hash($r['id_number']), $r['id']]);
-        foreach (db()->query("SELECT id, account FROM beneficiaries WHERE account IS NOT NULL AND account<>'' AND account NOT LIKE 'enc:%'")->fetchAll() as $r)
-            db()->prepare('UPDATE beneficiaries SET account=? WHERE id=?')->execute([enc($r['account']), $r['id']]);
-        foreach (db()->query("SELECT id, data FROM submissions WHERE data NOT LIKE 'enc:%'")->fetchAll() as $r)
-            db()->prepare('UPDATE submissions SET data=? WHERE id=?')->execute([enc($r['data']), $r['id']]);
-        foreach (db()->query("SELECT id, mfa_secret FROM users WHERE mfa_secret IS NOT NULL AND mfa_secret NOT LIKE 'enc:%'")->fetchAll() as $r)
-            db()->prepare('UPDATE users SET mfa_secret=? WHERE id=?')->execute([enc($r['mfa_secret']), $r['id']]);
-    }
-    db()->prepare("REPLACE INTO settings (k, v) VALUES ('schema_version', ?)")->execute([SCHEMA_VERSION]);
+    $jobs = [
+        ['clients', 'id_number', "id_number IS NOT NULL AND id_number<>'' AND id_number NOT LIKE 'enc:%'", true],
+        ['beneficiaries', 'account', "account IS NOT NULL AND account<>'' AND account NOT LIKE 'enc:%'", false],
+        ['submissions', 'data', "data NOT LIKE 'enc:%'", false],
+        ['users', 'mfa_secret', "mfa_secret IS NOT NULL AND mfa_secret NOT LIKE 'enc:%'", false],
+    ];
+    db()->beginTransaction();
+    try {
+        foreach ($jobs as [$t, $c, $where, $hash]) {
+            foreach (db()->query("SELECT id, `$c` AS v FROM `$t` WHERE $where")->fetchAll() as $r) {
+                $sealed = enc((string)$r['v']);
+                if (dec($sealed) !== (string)$r['v']) throw new RuntimeException("Encryption check failed in $t #{$r['id']}");
+                $hash ? q("UPDATE `$t` SET `$c`=?, id_number_hash=? WHERE id=?", [$sealed, id_hash((string)$r['v']), $r['id']])
+                      : q("UPDATE `$t` SET `$c`=? WHERE id=?", [$sealed, $r['id']]);
+                // read it back: what is stored must open to exactly the original
+                if (dec((string)val("SELECT `$c` FROM `$t` WHERE id=?", [$r['id']])) !== (string)$r['v']) throw new RuntimeException("Stored value check failed in $t #{$r['id']}");
+            }
+        }
+        db()->prepare("REPLACE INTO settings (k, v) VALUES ('schema_version', ?)")->execute([SCHEMA_VERSION]);
+        db()->commit();
+    } catch (Throwable $e) { if (db()->inTransaction()) db()->rollBack(); throw $e; }
 }
 
 function setting(string $k, ?string $default = null): ?string {
@@ -478,10 +513,39 @@ function save_id_upload(string $field): ?string {
     return $name;
 }
 
-function notify(string $subject, string $body): void {
+/**
+ * Sends a plain-text email. Never put passwords, codes, keys or client ID/account numbers in $body.
+ * $kind is a short label for the activity log (the address itself is not logged).
+ */
+function send_mail(string $to, string $subject, string $body, string $kind = 'notice'): bool {
     global $CONFIG;
-    $to = $CONFIG['notify_email'] ?? '';
-    if (!$to) return;
-    $headers = "From: DhanXfer Portal <no-reply@dhanxfer.com>\r\nContent-Type: text/plain; charset=UTF-8";
-    @mail($to, $subject, $body, $headers);
+    $to = trim($to);
+    if (!filter_var($to, FILTER_VALIDATE_EMAIL) || preg_match('/[\r\n]/', $subject)) return false;
+    if (($CONFIG['environment'] ?? '') === 'staging') $subject = '[STAGING] ' . $subject;
+    $from = $CONFIG['mail_from'] ?? 'no-reply@dhanxfer.com';
+    $domain = substr(strrchr($from, '@') ?: '@dhanxfer.com', 1);
+    $headers = implode("\r\n", [
+        'From: DhanXfer Portal <' . $from . '>',
+        'Reply-To: ' . ($CONFIG['mail_reply_to'] ?? 'Info@dhanxfer.com'),
+        'Message-ID: <' . bin2hex(random_bytes(12)) . '@' . $domain . '>',
+        'Date: ' . date('r'),
+        'MIME-Version: 1.0',
+        'Content-Type: text/plain; charset=UTF-8',
+        'Content-Transfer-Encoding: 8bit',
+        'Auto-Submitted: auto-generated',
+    ]);
+    $ok = @mail($to, '=?UTF-8?B?' . base64_encode($subject) . '?=', $body . "\n\n--\nDhanXfer Portal · WhatsApp +1 (942)-6600-0600 · www.dhanxfer.com\nThis is an automatic message.", $headers, '-f' . $from);
+    try { audit_write(null, $ok ? 'email_sent' : 'email_failed', 'email', null, $kind, 'mail'); } catch (Throwable $e) {}
+    return $ok;
+}
+function app_link(string $path): string { global $CONFIG; return rtrim($CONFIG['app_url'], '/') . $path; }
+/** Message to the owner/operations inbox (notify_email in the settings file). */
+function notify(string $subject, string $body, string $kind = 'notice'): void {
+    global $CONFIG;
+    if (!empty($CONFIG['notify_email'])) send_mail($CONFIG['notify_email'], $subject, $body, $kind);
+}
+/** Security notice to a team member's own email, if one is on file. */
+function notify_user(int $uid, string $subject, string $body, string $kind = 'security_alert'): bool {
+    $em = (string)val('SELECT email FROM users WHERE id=?', [$uid]);
+    return $em !== '' && send_mail($em, $subject, $body, $kind);
 }

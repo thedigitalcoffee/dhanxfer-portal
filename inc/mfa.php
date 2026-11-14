@@ -73,7 +73,10 @@ function mfa_fail(int $uid): void {
     q('INSERT INTO login_attempts (ip, username) VALUES (?,?)', [client_ip(), $key]);
     audit_write($uid, 'mfa_failed', 'user', $uid, 'Wrong two-step code', client_ip());
     $n = (int)val('SELECT COUNT(*) FROM login_attempts WHERE username=? AND at > (NOW() - INTERVAL 1 DAY)', [$key]);
-    if ($n === 5 || $n === 15) notify('Security alert: wrong two-step codes', "User #$uid has entered $n wrong two-step codes in the last 24 hours, which suggests someone else knows their password. Check the Activity history and consider resetting their password.");
+    if ($n === 5 || $n === 15) {
+        notify('Security alert: wrong two-step codes', "User #$uid has entered $n wrong two-step codes in the last 24 hours, which suggests someone else knows their password. Check the Activity history and consider resetting their password.", 'security_alert');
+        notify_user($uid, 'Security alert: wrong two-step codes on your DhanXfer account', "Someone entered the right password for your DhanXfer portal account but $n wrong two-step codes in the last 24 hours. If this was not you, your password is known to someone else: ask the super admin to reset it now." . ($n === 15 ? "\n\nTwo-step login on your account is now locked for 24 hours." : ''));
+    }
 }
 /** Strict browser rules for the pages that show or take two-step codes: no outside scripts at all. */
 function strict_csp(): void {

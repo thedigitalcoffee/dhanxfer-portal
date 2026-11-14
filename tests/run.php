@@ -56,7 +56,24 @@ db()->exec("INSERT INTO users (role, username, name, password_hash) VALUES ('adm
 db()->exec("INSERT INTO clients (client_no, name, phone, id_number, agent_id) VALUES ('DX-TEST-0001','Synthetic Client','+1 416 555 0100','AB123456',3)");
 db()->exec("INSERT INTO beneficiaries (client_id, name, account) VALUES (1,'Synthetic Beneficiary','000999888777')");
 db()->exec("INSERT INTO submissions (data, name, phone) VALUES ('{\"name\":\"Synthetic\",\"id_number\":\"ZZ998877\"}','Synthetic','+1 416 555 0199')");
+// edge cases a real database may hold: the longest values the old 80-character columns allow, non-Latin text, empty values
+$longId = str_repeat('L', 80); $iban = 'GB82WEST12345698765432XXXXXXXXXXXX'; $uni = 'ÄÖ-१२३४५-محمد';
+q("INSERT INTO clients (client_no, name, phone, id_number, agent_id) VALUES ('DX-TEST-0002','Synthetic Long','+1 416 555 0101',?,3),('DX-TEST-0003','Synthetic Uni','+1 416 555 0102',?,3),('DX-TEST-0004','Synthetic Empty','+1 416 555 0103','',3)", [$longId, $uni]);
+q("INSERT INTO beneficiaries (client_id, name, account) VALUES (2,'Synthetic IBAN',?),(2,'Synthetic Long',?)", [$iban, str_repeat('9', 80)]);
+ok(in_array('STRICT_ALL_TABLES', explode(',', (string)db()->query('SELECT @@SESSION.sql_mode')->fetchColumn()), true), 'database rejects truncated values instead of cutting them silently');
 migrate();
+require_once __DIR__ . '/../inc/verify.php';
+ok(dec((string)val("SELECT id_number FROM clients WHERE client_no='DX-TEST-0002'")) === $longId, 'longest possible old ID number (80 characters) survives encryption exactly');
+ok(dec((string)val("SELECT id_number FROM clients WHERE client_no='DX-TEST-0003'")) === $uni && val("SELECT id_number_hash FROM clients WHERE client_no='DX-TEST-0003'") === id_hash($uni), 'non-Latin ID number survives encryption and stays searchable');
+ok((string)val("SELECT id_number FROM clients WHERE client_no='DX-TEST-0004'") === '', 'empty ID number stays empty');
+ok(dec((string)val("SELECT account FROM beneficiaries WHERE name='Synthetic IBAN'")) === $iban && dec((string)val("SELECT account FROM beneficiaries WHERE name='Synthetic Long'")) === str_repeat('9', 80), 'IBAN and 80-digit account numbers survive encryption exactly');
+ok((int)val("SELECT CHARACTER_MAXIMUM_LENGTH FROM information_schema.COLUMNS WHERE TABLE_SCHEMA=DATABASE() AND TABLE_NAME='clients' AND COLUMN_NAME='id_number'") === 255, 'ID number column widened before encrypting');
+$hh = data_health();
+ok(!$hh['problems'], 'post-upgrade data check finds no problems' . ($hh['problems'] ? ' (' . implode('; ', $hh['problems']) . ')' : ''));
+ok($hh['encrypted']['clients.id_number']['plain'] === 0 && $hh['encrypted']['clients.id_number']['sealed'] === 3, 'data check counts every encrypted ID number');
+q("UPDATE clients SET id_number='PLAINTEXT1' WHERE client_no='DX-TEST-0002'");
+ok((bool)array_filter(data_health()['problems'], fn($x) => str_contains($x, 'still readable')), 'data check catches a value left readable');
+q("UPDATE clients SET id_number=?, id_number_hash=? WHERE client_no='DX-TEST-0002'", [enc($longId), id_hash($longId)]);
 ok((string)setting('schema_version') === SCHEMA_VERSION, 'v2 database upgrades to schema ' . SCHEMA_VERSION);
 ok((int)val("SELECT COUNT(*) FROM users WHERE role='super_admin'") === 0, 'upgrade promotes nobody to super admin');
 ok((int)val("SELECT COUNT(*) FROM users WHERE role='admin' AND mfa_token_only=1") === 2, 'existing admins can only set up two-step login through a verified link or claim');
