@@ -8,12 +8,12 @@ function data_health(): array {
     $r = ['schema' => (string)setting('schema_version'), 'counts' => [], 'encrypted' => [], 'problems' => []];
     foreach (db()->query('SHOW TABLES')->fetchAll(PDO::FETCH_COLUMN) as $t) $r['counts'][$t] = (int)db()->query("SELECT COUNT(*) FROM `$t`")->fetchColumn();
     if ($r['schema'] !== SCHEMA_VERSION) $r['problems'][] = 'schema version is ' . $r['schema'] . ', expected ' . SCHEMA_VERSION;
-    $cols = [['clients', 'id_number'], ['beneficiaries', 'account'], ['submissions', 'data'], ['users', 'mfa_secret']];
+    $cols = ENC_COLUMNS;
     foreach ($cols as [$t, $c]) {
         $tot = 0; $sealed = 0; $plain = 0; $bad = 0;
         foreach (db()->query("SELECT id, `$c` AS v FROM `$t` WHERE `$c` IS NOT NULL AND `$c`<>''") as $row) {
             $tot++;
-            if (!str_starts_with((string)$row['v'], 'enc:v1:')) { $plain++; continue; }
+            if (enc_kid((string)$row['v']) === null) { $plain++; continue; }
             $sealed++;
             if (dec((string)$row['v']) === null) $bad++;
         }

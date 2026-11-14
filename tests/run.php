@@ -522,6 +522,96 @@ ok($taken && (int)val('SELECT COUNT(*) FROM clients') === $nc, 'a new client wit
 $own = doc_add_version($cB, ['doc_type' => 'Passport', 'number' => 'X9988776', 'expires_on' => date('Y-m-d', strtotime('+3 years'))], 'admin', null);
 ok($own > 0, 'the owner of the ID number can still add a new version of it');
 
+// ---- 21. key ring: envelope encryption, rotation, Cloud KMS adapter (mocked: no cloud service is called) ----
+require_once __DIR__ . '/../inc/reseal.php';
+require_once __DIR__ . '/../inc/backup.php';
+$krFile = data_dir() . '/test-keyring-' . bin2hex(random_bytes(4)) . '.json';
+$cfgKeep = $CONFIG;
+$CONFIG['keyring_file'] = $krFile; $CONFIG['local_kek'] = base64_encode(random_bytes(32));
+keyring(true); keyring_key('', true);
+$v1 = enc('KR-PLAIN-1'); $idh = id_hash('KR123456');
+ok(str_starts_with($v1, 'enc:v1:') && keyring_active() === 'k0', 'without a key ring nothing changes: values are sealed with k0 as before');
+keyring_new('k1', 'local');
+ok(str_starts_with(enc('x'), 'enc:v1:'), 'a new key is not used until it is activated');
+ok(!str_contains((string)file_get_contents($krFile), base64_encode(keyring_key('k1'))) && (fileperms($krFile) & 0777) === 0600, 'the key ring file holds the data key only wrapped, and only the owner can read it');
+keyring_activate('k1');
+$v2 = enc('KR-PLAIN-2');
+ok(str_starts_with($v2, 'enc:v2:k1:') && dec($v2) === 'KR-PLAIN-2' && dec($v1) === 'KR-PLAIN-1', 'after activation new values name key k1; older k0 values still open');
+ok(id_hash('KR123456') === $idh && sec_key('index') === hash_hmac('sha256', 'dhanxfer:index', master_key(), true), 'search keys and signatures stay on the stable key (look-ups keep matching)');
+ok(dec(str_replace('enc:v2:k1:', 'enc:v2:k0:', $v2)) === null && dec(str_replace('enc:v2:k1:', 'enc:v2:k9:', $v2)) === null, 'a value relabelled with another key id does not open (key id is bound in)');
+$fk0 = 'kr_' . bin2hex(random_bytes(6)) . '.jpg';
+$CONFIG['keyring_file'] = '/nonexistent'; keyring(true); keyring_key('', true); id_file_write($fk0, 'OLD-FILE'); $CONFIG['keyring_file'] = $krFile; keyring(true); keyring_key('', true);
+$fk1 = 'kr_' . bin2hex(random_bytes(6)) . '.jpg'; id_file_write($fk1, 'NEW-FILE');
+ok(id_file_kid($fk0) === 'k0' && id_file_kid($fk1) === 'k1' && id_file_read($fk0) === 'OLD-FILE' && id_file_read($fk1) === 'NEW-FILE', 'ID files: new ones sealed with k1, older ones still open');
+$bkk = backup_create('keyring');
+ok(str_starts_with((string)file_get_contents(backup_dir() . '/' . $bkk['file']), 'DXB2') && is_array(backup_read($bkk['file'])['tables'] ?? null), 'backups are sealed with the active key and read back');
+@unlink(backup_dir() . '/' . $bkk['file']);
+$krc = insert_client(array_merge(array_fill_keys(CLIENT_FIELDS, ''), ['name' => 'Keyring Person', 'phone' => '+1 416 555 0601', 'office' => 'Canada', 'id_number' => 'KR123456']), ['source' => 'admin']);
+$dry = reseal_run(false);
+$other = array_sum(array_column($dry['columns'], 'other_key'));
+ok($other > 0 && $dry['files']['other_key'] >= 1 && (int)val("SELECT COUNT(*) FROM clients WHERE id_number LIKE 'enc:v1:%'") > 0, 'dry run counts what is still sealed with the old key and changes nothing');
+$wet = reseal_run(true, 7);
+$left = 0; foreach (ENC_COLUMNS as [$t, $c]) $left += (int)val("SELECT COUNT(*) FROM `$t` WHERE `$c` LIKE 'enc:v1:%'");
+ok($wet['failed'] === 0 && $left === 0 && id_file_kid($fk0) === 'k1' && id_file_read($fk0) === 'OLD-FILE', 're-seal moves every value and file to k1 (in batches), each read back before it counts');
+ok(dec((string)val('SELECT id_number FROM clients WHERE id=?', [$krc])) === 'KR123456' && (int)val('SELECT id FROM clients WHERE id_number_hash=?', [id_hash('KR123456')]) === $krc, 'after re-sealing the data opens and ID search still finds the client');
+ok(reseal_run(true)['columns']['clients.id_number']['resealed'] === 0, 're-seal can run again safely (nothing left to do)');
+ok(!preg_match('/wrapped|[A-Za-z0-9+\/]{40,}=/', json_encode(keyring_status())), 'key status shows ids and providers only, never key material');
+// Cloud KMS adapter against a stand-in: checks the sign-in, the key name and that the key id is bound in
+$saKey = openssl_pkey_new(['private_key_bits' => 2048, 'private_key_type' => OPENSSL_KEYTYPE_RSA]); openssl_pkey_export($saKey, $saPem);
+$saFile = data_dir() . '/test-sa-' . bin2hex(random_bytes(4)) . '.json';
+file_put_contents($saFile, json_encode(['type' => 'service_account', 'client_email' => 'dx-test@example.iam.gserviceaccount.com', 'private_key' => $saPem]));
+$CONFIG['kms_enabled'] = true; $CONFIG['kms_sa_file'] = $saFile;
+$kmsName = 'projects/dx-test/locations/northamerica-northeast1/keyRings/dx/cryptoKeys/data-kek';
+$kek = random_bytes(32); $calls = []; $kmsDown = false;
+$GLOBALS['KMS_HTTP'] = function (string $url, array $h, string $body) use (&$calls, &$kek, &$kmsDown, $kmsName, $saKey) {
+    $calls[] = $url;
+    if ($kmsDown) return [503, '{}'];
+    if ($url === 'https://oauth2.googleapis.com/token') {
+        parse_str($body, $f); [$hd, $pl, $sg] = explode('.', $f['assertion']);
+        $ok = openssl_verify("$hd.$pl", base64_decode(strtr($sg, '-_', '+/')), openssl_pkey_get_details($saKey)['key'], OPENSSL_ALGO_SHA256) === 1;
+        $claims = json_decode(base64_decode(strtr($pl, '-_', '+/')), true);
+        return $ok && $claims['scope'] === 'https://www.googleapis.com/auth/cloudkms' ? [200, json_encode(['access_token' => 'tok-1', 'expires_in' => 3600])] : [401, '{}'];
+    }
+    if (!in_array('Authorization: Bearer tok-1', $h, true)) return [401, '{}'];
+    $j = json_decode($body, true); $aad = base64_decode($j['additionalAuthenticatedData'] ?? '');
+    if ($url === "https://cloudkms.googleapis.com/v1/$kmsName:encrypt") return [200, json_encode(['ciphertext' => base64_encode(aead_seal(base64_decode($j['plaintext']), $kek, $aad))])];
+    if ($url === "https://cloudkms.googleapis.com/v1/$kmsName:decrypt") { $p = aead_open(base64_decode($j['ciphertext']), $kek, $aad); return $p === null ? [400, '{}'] : [200, json_encode(['plaintext' => base64_encode($p)])]; }
+    return [404, '{}'];
+};
+keyring_new('k2', 'gcpkms', $kmsName); keyring_activate('k2');
+$v3 = enc('KMS-PLAIN');
+ok(str_starts_with($v3, 'enc:v2:k2:') && dec($v3) === 'KMS-PLAIN' && dec($v2) === 'KR-PLAIN-2', 'Cloud KMS key: the data key is unwrapped by KMS with a signed service-account sign-in; older keys still open');
+$n = count($calls); keyring_key('', true); dec($v3); dec($v3); dec(enc('again'));
+ok(count($calls) - $n === 1, 'KMS is called once per request to unwrap the key, not once per value (cost and speed)');
+$wrappedBefore = keyring()['keys']['k2']['wrapped']; $kekOld = $kek;
+keyring_key('k2'); $dekK2 = keyring_key('k2');
+// KMS rotation: a new key version; old wrapped key still opens (KMS keeps old versions); rewrap moves it to the new primary
+$kek2 = random_bytes(32);
+$GLOBALS['KMS_HTTP_PREV'] = $GLOBALS['KMS_HTTP'];
+$kek = $kek2; $oldKek = $kekOld;
+$GLOBALS['KMS_HTTP'] = function (string $url, array $h, string $body) use (&$calls, $kmsName, $oldKek, &$kek) {
+    $calls[] = $url; if ($url === 'https://oauth2.googleapis.com/token') return [200, json_encode(['access_token' => 'tok-1', 'expires_in' => 3600])];
+    $j = json_decode($body, true); $aad = base64_decode($j['additionalAuthenticatedData'] ?? '');
+    if (str_ends_with($url, ':encrypt')) return [200, json_encode(['ciphertext' => base64_encode(aead_seal(base64_decode($j['plaintext']), $kek, $aad))])];
+    $p = aead_open(base64_decode($j['ciphertext']), $kek, $aad) ?? aead_open(base64_decode($j['ciphertext']), $oldKek, $aad);
+    return $p === null ? [400, '{}'] : [200, json_encode(['plaintext' => base64_encode($p)])];
+};
+keyring_key('', true); keyring_rewrap('k2');
+ok(keyring()['keys']['k2']['wrapped'] !== $wrappedBefore && keyring_key('k2') === $dekK2 && dec($v3) === 'KMS-PLAIN', 'after a KMS key rotation the data key is wrapped again; no client data has to be re-encrypted');
+$GLOBALS['KMS_HTTP'] = $GLOBALS['KMS_HTTP_PREV']; $kmsDown = true; keyring_key('', true);
+$downErr = ''; try { dec($v3); } catch (Throwable $ex) { $downErr = $ex->getMessage(); }
+ok(!enc_ready() && str_contains($downErr, 'HTTP 503') && dec($v1) === 'KR-PLAIN-1', 'if KMS cannot be reached, values sealed with the KMS key cannot be opened (clear error, nothing leaked); k0 values still open');
+$kmsDown = false;
+$CONFIG['local_kek'] = base64_encode(random_bytes(32)); keyring_key('', true);
+$wrongKek = ''; try { keyring_key('k1'); } catch (Throwable $ex) { $wrongKek = $ex->getMessage(); }
+ok(str_contains($wrongKek, 'could not be unwrapped'), 'a wrong key-encryption key is detected, never used');
+$bad = false; try { keyring_new('k1', 'local'); } catch (Throwable $ex) { $bad = true; }
+ok($bad, 'key ids are never reused');
+// put everything back: no key ring, KMS off
+$GLOBALS['KMS_HTTP'] = null; $CONFIG = $cfgKeep; @unlink($krFile); @unlink($saFile); keyring(true); keyring_key('', true);
+foreach ([$fk0, $fk1] as $f) @unlink(ids_dir() . '/' . $f);
+ok(keyring_active() === 'k0' && str_starts_with(enc('z'), 'enc:v1:'), 'with the key ring removed the panel is back on the config key');
+
 $summary = sprintf("%s  %d passed, %d failed\n", date('Y-m-d H:i:s'), $pass, $fail);
 $report = $summary . implode("\n", $out) . "\n";
 echo $report;

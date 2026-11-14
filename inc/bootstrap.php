@@ -444,9 +444,17 @@ function master_key(): string {
     if ($k === false || strlen($k) !== 32) throw new RuntimeException('The encryption key is missing from the server config.');
     return $k;
 }
-function enc_ready(): bool { try { master_key(); return true; } catch (Throwable $e) { return false; } }
-/** A separate key for each job, derived from the master key. */
-function sec_key(string $purpose): string { return hash_hmac('sha256', 'dhanxfer:' . $purpose, master_key(), true); }
+require_once __DIR__ . '/keyring.php';
+function enc_ready(): bool { try { keyring_key(keyring_active()); keyring_key(keyring_stable()); return true; } catch (Throwable $e) { return false; } }
+/**
+ * A separate key for each job, derived from a root key of the key ring (inc/keyring.php).
+ * Sealing jobs (data, files, backup) use the active key unless a stored value names its key; search keys and
+ * signatures use the stable key. Without a key ring both are k0 = the config master key, exactly as before.
+ */
+function sec_key(string $purpose, ?string $kid = null): string {
+    $kid ??= in_array($purpose, ['data', 'files', 'backup'], true) ? keyring_active() : keyring_stable();
+    return hash_hmac('sha256', 'dhanxfer:' . $purpose, keyring_key($kid), true);
+}
 /**
  * Authenticated encryption: AES-256-GCM (OpenSSL, available on every host) with a random 12-byte nonce.
  * Stored as "enc:v1:" + base64(nonce | tag | ciphertext). Any change to the stored value makes decryption fail.
@@ -462,14 +470,29 @@ function aead_open(string $raw, string $key, string $aad = ''): ?string {
     $p = openssl_decrypt(substr($raw, 28), 'aes-256-gcm', $key, OPENSSL_RAW_DATA, substr($raw, 0, 12), substr($raw, 12, 16), $aad);
     return $p === false ? null : $p;
 }
+/** "enc:v1:…" = sealed with k0 (the config key); "enc:v2:<kid>:…" = sealed with key ring key <kid> (bound in as AAD). */
 function enc(?string $plain): ?string {
     if ($plain === null || $plain === '') return $plain;
-    return 'enc:v1:' . base64_encode(aead_seal($plain, sec_key('data')));
+    $kid = keyring_active();
+    if ($kid === 'k0') return 'enc:v1:' . base64_encode(aead_seal($plain, sec_key('data', 'k0')));
+    return 'enc:v2:' . $kid . ':' . base64_encode(aead_seal($plain, sec_key('data', $kid), 'v2:' . $kid));
 }
 function dec(?string $stored): ?string {
-    if ($stored === null || !str_starts_with($stored, 'enc:v1:')) return $stored;
-    $raw = base64_decode(substr($stored, 7), true);
-    return $raw === false ? null : aead_open($raw, sec_key('data'));
+    if ($stored === null) return null;
+    if (str_starts_with($stored, 'enc:v1:')) { $raw = base64_decode(substr($stored, 7), true); return $raw === false ? null : aead_open($raw, sec_key('data', 'k0')); }
+    if (str_starts_with($stored, 'enc:v2:') && preg_match('/^enc:v2:(k[0-9]{1,4}):(.+)$/s', $stored, $m)) {
+        $raw = base64_decode($m[2], true);
+        if ($raw === false || !isset(keyring()['keys'][$m[1]])) return null; // damaged value or a key this server does not have
+        return aead_open($raw, sec_key('data', $m[1]), 'v2:' . $m[1]);
+    }
+    if (str_starts_with($stored, 'enc:')) return null; // unknown format: never hand back sealed text as if it were data
+    return $stored;
+}
+/** Which key sealed a stored value (null = not sealed). Used by the re-seal tool. */
+function enc_kid(?string $stored): ?string {
+    if ($stored === null) return null;
+    if (str_starts_with($stored, 'enc:v1:')) return 'k0';
+    return preg_match('/^enc:v2:(k[0-9]{1,4}):/', $stored, $m) ? $m[1] : null;
 }
 /** Exact-match search key for an ID number, without storing it readable. */
 function id_hash(?string $idNo): ?string {
@@ -595,7 +618,9 @@ function id_file_write(string $name, string $plain): bool {
     $dir = ids_dir();
     if (!is_dir($dir)) mkdir($dir, 0750, true);
     $tmp = $dir . '/.' . $name . '.' . bin2hex(random_bytes(4));
-    if (file_put_contents($tmp, 'DXF1' . aead_seal($plain, sec_key('files'), $name)) === false) return false;
+    $kid = keyring_active();
+    $body = $kid === 'k0' ? 'DXF1' . aead_seal($plain, sec_key('files', 'k0'), $name) : 'DXF2' . chr(strlen($kid)) . $kid . aead_seal($plain, sec_key('files', $kid), $kid . ':' . $name);
+    if (file_put_contents($tmp, $body) === false) return false;
     @chmod($tmp, 0640);
     return rename($tmp, $dir . '/' . $name);
 }
@@ -603,12 +628,24 @@ function id_file_read(string $name): ?string {
     $path = ids_dir() . '/' . basename($name);
     if (!is_file($path)) return null;
     $raw = (string)file_get_contents($path);
-    if (!str_starts_with($raw, 'DXF1')) return $raw; // older plain file
-    return aead_open(substr($raw, 4), sec_key('files'), basename($name));
+    if (str_starts_with($raw, 'DXF1')) return aead_open(substr($raw, 4), sec_key('files', 'k0'), basename($name));
+    if (str_starts_with($raw, 'DXF2')) {
+        $kid = substr($raw, 5, ord($raw[4] ?? "\0"));
+        if (!preg_match('/^k[0-9]{1,4}$/', $kid) || !isset(keyring()['keys'][$kid])) return null;
+        return aead_open(substr($raw, 5 + strlen($kid)), sec_key('files', $kid), $kid . ':' . basename($name));
+    }
+    return $raw; // older plain file
 }
 function id_file_encrypted(string $name): bool {
     $h = @fopen(ids_dir() . '/' . basename($name), 'rb'); if (!$h) return false;
-    $m = fread($h, 4); fclose($h); return $m === 'DXF1';
+    $m = fread($h, 4); fclose($h); return $m === 'DXF1' || $m === 'DXF2';
+}
+/** Key id of an ID file (k0 for DXF1), null if not encrypted. */
+function id_file_kid(string $name): ?string {
+    $h = @fopen(ids_dir() . '/' . basename($name), 'rb'); if (!$h) return null;
+    $m = (string)fread($h, 9); fclose($h);
+    if (str_starts_with($m, 'DXF1')) return 'k0';
+    return str_starts_with($m, 'DXF2') ? substr($m, 5, ord($m[4] ?? "\0")) : null;
 }
 
 /**
