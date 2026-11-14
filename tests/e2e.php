@@ -60,7 +60,7 @@ q('SET SESSION wait_timeout=900, interactive_timeout=900');
 function e2e_cleanup(): void {
     q("DELETE FROM submissions WHERE phone IN ('+1 416 555 7009','+1 416 555 7010')");
     q("DELETE FROM transfers WHERE ref_no='E2E-T2'"); q("DELETE FROM clients WHERE name IN ('E2E Client One','E2E Client Two')");
-    q("DELETE FROM users WHERE username IN ('e2e.legacy','e2e.staffx')"); q('DELETE FROM login_attempts');
+    q("DELETE FROM users WHERE username IN ('e2e.legacy','e2e.staffx','e2e.v2owner')"); q('DELETE FROM login_attempts');
     q("UPDATE users SET role='admin' WHERE username='test.admin'"); q("DELETE FROM settings WHERE k='owner_claim'");
 }
 e2e_cleanup(); // leftovers from an interrupted run
@@ -246,6 +246,23 @@ q("INSERT INTO users (role, username, name, password_hash) VALUES ('admin','e2e.
 owner_claim($stuck); // an admin started the claim and never finished
 ok(clear_owner_claim() && val("SELECT v FROM settings WHERE k='owner_claim'") === null && val('SELECT role FROM users WHERE id=?', [$stuck]) === 'admin', 'a half-finished claim can be cleared from the server without promoting anyone');
 
+
+// ---- 11. the live cutover path: the existing v2 admin (no two-step yet, link-only) claims super admin ----
+q("DELETE FROM settings WHERE k='owner_claim'");
+q("INSERT INTO users (role, username, name, password_hash, mfa_token_only) VALUES ('admin','e2e.v2owner','E2E V2 Owner',?,1)", [password_hash('V2-Owner-Pass-1', PASSWORD_DEFAULT)]);
+$v2 = (int)db()->lastInsertId();
+$lo = new Browser(); $lo->login('e2e.v2owner', 'V2-Owner-Pass-1', false);
+ok(str_contains($lo->body, 'through a link') && (int)val('SELECT mfa_enabled FROM users WHERE id=?', [$v2]) === 0, 'v2 admin password alone cannot start two-step setup on the login page');
+$vc = new Browser(); $vc->req('/install.php');
+ok($vc->code === 200 && str_contains($vc->body, 'install_key'), 'install page is open for the claim while no working super admin exists');
+$vc->req('/install.php', ['csrf' => $vc->csrf(), 'install_key' => $CONFIG['install_key'], 'username' => 'e2e.v2owner', 'password' => 'V2-Owner-Pass-1', 'code' => '', 'confirm' => '1']);
+$sec2 = preg_match('/letter-spacing:\.08em;font-size:17px">([A-Z2-7 ]+)</', $vc->body, $sm2) ? str_replace(' ', '', $sm2[1]) : '';
+ok($sec2 !== '' && val('SELECT role FROM users WHERE id=?', [$v2]) === 'admin', 'install key + password lead to two-step setup; still admin until the code is confirmed');
+$vc->req('/?p=clients', null, false); ok(in_array($vc->code, [302, 303], true), 'no session during the claim before the code');
+$vc->req('/mfa_setup.php', ['csrf' => $vc->csrf(), 'code' => totp_code($sec2, intdiv(time(), 30))]);
+ok(val('SELECT role FROM users WHERE id=?', [$v2]) === 'super_admin' && (int)val('SELECT mfa_enabled FROM users WHERE id=?', [$v2]) === 1, 'after the code the v2 admin is super admin with two-step login');
+$vc2 = new Browser(); $vc2->req('/install.php', null, false); ok($vc2->code === 404, 'install page closes after the claim');
+q('DELETE FROM users WHERE id=?', [$v2]); q("DELETE FROM settings WHERE k='owner_claim'");
 // ---- 10. phone-size layout snapshots (synthetic staging data) ----
 $m1 = new Browser(); $m1->login('test.agent1');
 foreach (['agent_home' => '/', 'agent_clients' => '/?p=clients', 'agent_new_client' => '/?p=client_form', 'agent_rates' => '/?p=rates', 'agent_transfers' => '/?p=transfers', 'agent_commission' => '/?p=commission', 'agent_transfer_new' => '/?p=transfer_form'] as $k => $pth) { $m1->req($pth); snap($k, $m1->body); }

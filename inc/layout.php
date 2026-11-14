@@ -19,7 +19,7 @@ function page_head(string $title, bool $public = false): void {
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
 <link href="https://fonts.googleapis.com/css2?family=Lora:wght@500;600;700&family=Source+Sans+3:wght@400;500;600;700&display=swap" rel="stylesheet">
-<link rel="stylesheet" href="/assets/style.css?v=3">
+<link rel="stylesheet" href="/assets/style.css?v=4">
 </head>
 <body class="<?= $public ? 'public' : 'app' ?><?= $u && $u['role'] === 'agent' && !$public ? ' agent' : '' ?>">
 <?php global $CONFIG; if (($CONFIG['environment'] ?? 'live') === 'staging'): ?><div style="background:#7A2E00;color:#FFE3B8;text-align:center;padding:6px;font-weight:700;font-size:13px">STAGING · test system · not real data</div><?php endif; ?>
@@ -57,7 +57,7 @@ function page_head(string $title, bool $public = false): void {
 <?php if ($u['role'] === 'agent'): ?>
 <nav class="bottombar" aria-label="Quick menu">
   <a href="/?p=dashboard" class="<?= $cur === 'dashboard' ? 'active' : '' ?>"><span aria-hidden="true">⌂</span>Home</a>
-  <a href="/?p=rates" class="<?= $cur === 'rates' ? 'active' : '' ?>"><span aria-hidden="true">₊</span>Rates</a>
+  <a href="/?p=rates" class="<?= $cur === 'rates' ? 'active' : '' ?>"><span aria-hidden="true">₹</span>Rates</a>
   <a href="/?p=client_form" class="plus"><span aria-hidden="true">+</span>Client</a>
   <a href="/?p=clients" class="<?= $cur === 'clients' ? 'active' : '' ?>"><span aria-hidden="true">☰</span>Clients</a>
   <a href="/?p=transfers" class="<?= $cur === 'transfers' ? 'active' : '' ?>"><span aria-hidden="true">⇄</span>Transfers</a>
@@ -78,7 +78,7 @@ function page_foot(): void { ?>
   <span>Info@dhanxfer.com</span>
   <a href="https://www.dhanxfer.com">www.dhanxfer.com</a>
 </footer>
-<script src="/assets/app.js?v=3"></script>
+<script src="/assets/app.js?v=4"></script>
 </body>
 </html>
 <?php }

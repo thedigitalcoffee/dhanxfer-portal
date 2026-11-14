@@ -52,6 +52,7 @@ body.public main{max-width:860px}
 .grid2{display:grid;grid-template-columns:1.4fr 1fr;gap:16px}
 @media (max-width:900px){.grid2{grid-template-columns:1fr}}
 
+[hidden]{display:none!important}
 .btn{display:inline-block;background:var(--panel2);border:1px solid var(--line);border-radius:7px;padding:8px 14px;cursor:pointer;font-weight:600;color:var(--ink);text-decoration:none}
 .btn:hover{border-color:var(--gold)}
 .btn.gold{background:var(--gold);color:#121212;border-color:var(--gold)}
@@ -138,7 +139,7 @@ footer{border-top:1px solid var(--line);padding:16px 24px;color:var(--muted);fon
   body{font-size:16px}
   input,select,textarea{font-size:16px;padding:12px}
   .btn{padding:11px 16px}
-  .btn.sm{padding:7px 12px}
+  .btn.sm{padding:10px 14px;min-height:44px}
   h1{font-size:24px}
   .tiles{grid-template-columns:1fr 1fr}
   .tile .v{font-size:22px}
