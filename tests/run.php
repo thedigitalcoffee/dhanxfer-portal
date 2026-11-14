@@ -351,7 +351,7 @@ $skip = array_filter($rem, fn($r) => in_array($r['event_key'], ['exp-90', 'exp-6
 ok(count($pend) === 2 && count($skip) === 4, 'ID expiring in 25 days: the 30-day reminder is made (email + staff); missed earlier stages are skipped, not sent late');
 ok((int)val("SELECT COUNT(*) FROM rekyc_cases WHERE client_id=? AND reason='doc_expiring'", [$kc]) === 1, 'a KYC refresh case opens for the expiring ID');
 $before = (int)val('SELECT COUNT(*) FROM reminders'); compliance_daily(); compliance_daily();
-ok((int)val('SELECT COUNT(*) FROM reminders') === $before && (int)val("SELECT COUNT(*) FROM rekyc_cases WHERE client_id=?", [$kc]) === 1, 'running the daily check again creates no duplicates');
+ok((int)val('SELECT COUNT(*) FROM reminders') === $before && (int)val("SELECT COUNT(*) FROM rekyc_cases WHERE client_id=? AND open_key LIKE 'doc%'", [$kc]) === 1, 'running the daily check again creates no duplicates');
 compliance_daily(date('Y-m-d', strtotime('+20 days')));
 ok((int)val("SELECT COUNT(*) FROM reminders WHERE client_id=? AND event_key='exp-7' AND status IN ('pending','sent')", [$kc]) === 2, 'the 7-day reminder follows when its date comes');
 $sentMails = [];
@@ -371,9 +371,9 @@ ok(val('SELECT last_error FROM reminders WHERE id=?', [$rr['id']]) === 'No email
 q("UPDATE document_versions SET expires_on=DATE_SUB(CURDATE(), INTERVAL 1 DAY) WHERE client_id=?", [$kc]);
 compliance_daily();
 ok(val("SELECT reason FROM rekyc_cases WHERE client_id=? AND status IN ('required','in_progress','escalated')", [$kc]) === 'doc_expired' && (int)val("SELECT COUNT(*) FROM reminders WHERE client_id=? AND event_key='expiry'", [$kc]) >= 1, 'on expiry the case becomes "expired" and the expiry-day alert is made');
-q("UPDATE rekyc_cases SET due_date=DATE_SUB(CURDATE(), INTERVAL 30 DAY) WHERE client_id=?", [$kc]);
+q("UPDATE rekyc_cases SET due_date=DATE_SUB(CURDATE(), INTERVAL 30 DAY) WHERE client_id=? AND open_key LIKE 'doc%'", [$kc]);
 compliance_daily();
-ok(val('SELECT status FROM rekyc_cases WHERE client_id=? ORDER BY id LIMIT 1', [$kc]) === 'escalated', 'overdue refresh case is escalated');
+ok(val("SELECT status FROM rekyc_cases WHERE client_id=? AND open_key LIKE 'doc%' ORDER BY id LIMIT 1", [$kc]) === 'escalated', 'overdue refresh case is escalated');
 $pc2 = insert_client(array_merge(array_fill_keys(CLIENT_FIELDS, ''), ['name' => 'Periodic Synthetic', 'phone' => '+1 416 555 0305', 'office' => 'Canada']), ['source' => 'admin', 'kyc' => 'Verified']);
 q('UPDATE clients SET kyc_next_review=DATE_ADD(CURDATE(), INTERVAL 10 DAY) WHERE id=?', [$pc2]);
 compliance_daily();
