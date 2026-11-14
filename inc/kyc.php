@@ -70,6 +70,13 @@ function doc_sync_client(int $clientId): void {
       [$v['doc_type'], $v['number_enc'], $v['number_hash'], $v['issuing_country'], $v['expires_on'], $v['file_name'], $v['has_address'], $v['address_json'], $match, $clientId]);
 }
 
+/** Identity details of a verified client changed (name, date of birth, address, phone…): it needs a new review. */
+function kyc_identity_changed(int $clientId, string $what, ?int $by): void {
+    if (q("UPDATE clients SET kyc='Pending', updated_at=NOW() WHERE id=? AND kyc='Verified'", [$clientId])->rowCount())
+        audit_write($by, 'kyc_reopened', 'client', $clientId, 'Identity details changed (' . $what . '): needs a new KYC review', $by ? client_ip() : 'system');
+    doc_sync_client($clientId);
+}
+
 /* ---------- transfer eligibility (backend policy) ---------- */
 
 /** Returns [allowed, reasons]. Used when a transfer is requested and again when it is accepted. */
@@ -78,6 +85,8 @@ function transfer_eligibility(array $c): array {
     if ($c['kyc'] === 'Rejected') $r[] = 'KYC was rejected.';
     elseif (setting('block_unverified', '1') === '1' && $c['kyc'] !== 'Verified') $r[] = 'KYC is not approved yet (' . $c['kyc'] . ').';
     $v = doc_current((int)$c['id']);
+    // the ID in use must itself have been approved: a newer, unreviewed upload does not count
+    if (setting('block_unverified', '1') === '1' && $c['kyc'] === 'Verified' && (!$v || $v['outcome'] !== 'verified')) $r[] = 'The current ID has not been reviewed yet.';
     $exp = $v['expires_on'] ?? ($c['id_expiry'] ?? null);
     if (setting('block_expired_doc', '1') === '1') {
         if (!$exp) $r[] = 'No ID expiry date on file.';
@@ -134,7 +143,6 @@ function kyc_decide(array $client, array $reviewer, array $in): array {
     if ($e) return [false, $e, null];
 
     $status = ['approve' => 'Verified', 'request_info' => 'Info requested', 'reject' => 'Rejected', 'escalate' => 'Escalated'][$decision];
-    $case = one("SELECT * FROM rekyc_cases WHERE client_id=? AND status IN ('required','in_progress','escalated') ORDER BY id LIMIT 1", [$client['id']]);
     $check = [];
     foreach (array_keys(KYC_CHECKLIST) as $k) $check[$k] = in_array($k, $ticked, true);
     $check['screening_ref'] = mb_substr(trim((string)($in['screening_ref'] ?? '')), 0, 120);
@@ -143,6 +151,7 @@ function kyc_decide(array $client, array $reviewer, array $in): array {
     try {
         // only one decision at a time for a client: the row lock makes a second reviewer wait and re-check
         $now = one('SELECT kyc FROM clients WHERE id=? FOR UPDATE', [$client['id']]);
+        $case = one("SELECT * FROM rekyc_cases WHERE client_id=? AND status IN ('required','in_progress','escalated') ORDER BY id LIMIT 1", [$client['id']]);
         if ($decision === 'approve' && $now['kyc'] === 'Verified' && !$case) throw new RuntimeException('Another reviewer just approved this client.');
         q('INSERT INTO kyc_reviews (client_id, case_type, rekyc_case_id, document_version_id, decision, checklist, risk, address_result, notes, evidence, reviewer_id, reviewer_role) VALUES (?,?,?,?,?,?,?,?,?,?,?,?)',
           [$client['id'], $case ? 'rekyc' : 'initial', $case['id'] ?? null, $ver['id'] ?? null, $decision, json_encode($check), $risk, $addrRes, mb_substr($notes, 0, 4000), mb_substr($evidence, 0, 500) ?: null, $reviewer['id'], $reviewer['role']]);
@@ -152,7 +161,7 @@ function kyc_decide(array $client, array $reviewer, array $in): array {
             $months = (int)setting('refresh_months_' . strtolower((string)$risk), '24');
             $next = date('Y-m-d', strtotime(today() . " +$months months"));
             if ($ver) q("UPDATE document_versions SET outcome='verified', outcome_by=?, outcome_at=NOW() WHERE id=?", [$reviewer['id'], $ver['id']]);
-            if ($case) q("UPDATE rekyc_cases SET status='completed', closed_at=NOW(), closed_review_id=? WHERE id=?", [$rid, $case['id']]);
+            q("UPDATE rekyc_cases SET status='completed', closed_at=NOW(), closed_review_id=? WHERE client_id=? AND status IN ('required','in_progress','escalated')", [$rid, $client['id']]);
         } elseif ($decision === 'reject') {
             if ($ver) q("UPDATE document_versions SET outcome='rejected', outcome_by=?, outcome_at=NOW() WHERE id=?", [$reviewer['id'], $ver['id']]);
         } elseif ($decision === 'escalate' && $case) {
@@ -231,10 +240,15 @@ function kyc_migrate_v7(): void {
         if ($p['ok']) q('UPDATE clients SET phone_e164=?, phone_region=? WHERE id=?', [$p['e164'], $p['region'], $c['id']]);
     }
     // referral codes: login ID is the current code, the old SA-#### code stays reserved for the same agent
-    foreach (all("SELECT id, username, ref_code FROM users WHERE role='agent'") as $a) {
-        q('INSERT IGNORE INTO agent_codes (agent_id, code, is_current) VALUES (?,?,1)', [$a['id'], mb_strtolower($a['username'])]);
-        if ($a['ref_code']) q('INSERT IGNORE INTO agent_codes (agent_id, code, is_current, retired_at) VALUES (?,?,0,NOW())', [$a['id'], mb_strtolower($a['ref_code'])]);
+    $agents = all("SELECT id, username, ref_code FROM users WHERE role='agent' ORDER BY id");
+    foreach ($agents as $a) q('INSERT IGNORE INTO agent_codes (agent_id, code, is_current) VALUES (?,?,1)', [$a['id'], mb_strtolower($a['username'])]);
+    foreach ($agents as $a) if ($a['ref_code']) {
+        $own = val('SELECT agent_id FROM agent_codes WHERE code=?', [mb_strtolower($a['ref_code'])]);
+        if ($own === null) q('INSERT INTO agent_codes (agent_id, code, is_current, retired_at) VALUES (?,?,0,NOW())', [$a['id'], mb_strtolower($a['ref_code'])]);
+        elseif ((int)$own !== (int)$a['id']) audit_write(null, 'agent_code_conflict', 'user', $a['id'], 'Old code ' . $a['ref_code'] . ' equals another agent\'s login ID: not reserved', 'system');
     }
+    // clients verified under the old one-click process get a KYC refresh within 30 days
+    q("UPDATE clients SET kyc_next_review=DATE_ADD(CURDATE(), INTERVAL 30 DAY) WHERE kyc='Verified' AND kyc_next_review IS NULL");
     // ID images saved before encryption are encrypted in place
     foreach (glob(ids_dir() . '/*') ?: [] as $f) {
         $n = basename($f);

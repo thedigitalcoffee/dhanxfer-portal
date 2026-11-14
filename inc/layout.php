@@ -85,7 +85,7 @@ function page_foot(): void { ?>
 <?php }
 
 function kyc_pill(?string $k): string {
-    $m = ['Verified' => 'p-ok', 'Pending' => 'p-warn', 'Rejected' => 'p-bad', 'Expired' => 'p-bad'];
+    $m = ['Verified' => 'p-ok', 'Pending' => 'p-warn', 'Rejected' => 'p-bad', 'Expired' => 'p-bad', 'Info requested' => 'p-info', 'Escalated' => 'p-bad'];
     return '<span class="pill ' . ($m[$k] ?? 'p-mute') . '">' . e($k ?: 'Pending') . '</span>';
 }
 function tx_pill(string $s): string {

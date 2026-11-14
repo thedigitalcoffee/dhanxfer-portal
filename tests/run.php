@@ -62,6 +62,7 @@ db()->exec("INSERT INTO submissions (data, name, phone) VALUES ('{\"name\":\"Syn
 $longId = str_repeat('L', 80); $iban = 'GB82WEST12345698765432XXXXXXXXXXXX'; $uni = 'ÄÖ-१२३४५-محمد';
 q("INSERT INTO clients (client_no, name, phone, id_number, agent_id) VALUES ('DX-TEST-0002','Synthetic Long','+1 416 555 0101',?,3),('DX-TEST-0003','Synthetic Uni','+1 416 555 0102',?,3),('DX-TEST-0004','Synthetic Empty','+1 416 555 0103','',3)", [$longId, $uni]);
 q("INSERT INTO beneficiaries (client_id, name, account) VALUES (2,'Synthetic IBAN',?),(2,'Synthetic Long',?)", [$iban, str_repeat('9', 80)]);
+q("INSERT INTO clients (client_no, name, phone, kyc, agent_id) VALUES ('DX-TEST-0005','Synthetic Legacy Verified','+1 416 555 0105','Verified',3)");
 ok(in_array('STRICT_ALL_TABLES', explode(',', (string)db()->query('SELECT @@SESSION.sql_mode')->fetchColumn()), true), 'database rejects truncated values instead of cutting them silently');
 // rollback drill: back up the old (v2) database, upgrade, restore the backup, upgrade again
 $fpV2 = db_fingerprint(); $bkV2 = backup_create('pre-upgrade');
@@ -98,6 +99,7 @@ $c1doc = one("SELECT v.* FROM document_versions v JOIN clients c ON c.id=v.clien
 ok($c1doc && $c1doc['source'] === 'migration' && dec($c1doc['number_enc']) === 'AB123456' && (int)val("SELECT COUNT(*) FROM client_documents d JOIN clients c ON c.id=d.client_id WHERE c.client_no='DX-TEST-0001'") === 1, 'upgrade moves each existing ID into the document history (version 1), once');
 ok(agent_by_code('agent1') && (int)agent_by_code('agent1')['id'] === (int)val("SELECT id FROM users WHERE username='agent1'"), 'upgrade gives each sub-agent their login ID as referral code');
 ok(val("SELECT phone_e164 FROM clients WHERE client_no='DX-TEST-0001'") === '+14165550100', 'upgrade stores existing phone numbers in international form');
+ok(val("SELECT kyc_next_review FROM clients WHERE client_no='DX-TEST-0005'") === date('Y-m-d', strtotime('+30 days')), 'clients verified under the old one-click process get a KYC refresh within 30 days');
 ok((string)val("SELECT COLUMN_TYPE FROM information_schema.COLUMNS WHERE TABLE_SCHEMA=DATABASE() AND TABLE_NAME='clients' AND COLUMN_NAME='kyc'") !== '' && str_contains((string)val("SELECT COLUMN_TYPE FROM information_schema.COLUMNS WHERE TABLE_SCHEMA=DATABASE() AND TABLE_NAME='clients' AND COLUMN_NAME='kyc'"), 'Escalated'), 'KYC states extended (information requested, escalated)');
 
 // ---- 0b. backup and restore ----
@@ -315,6 +317,19 @@ as_user($comp);
 $r = kyc_decide($kcr(), $comp, ['decision' => 'escalate', 'notes' => 'Second opinion needed on source of funds.', 'code' => $code()]); $reset();
 ok($r[0] && $kcr()['kyc'] === 'Escalated', 'compliance officer can escalate with notes');
 [$el] = transfer_eligibility($kcr()); ok(!$el, 'escalated client cannot transfer');
+
+// review fixes: identity changes reopen the review; a new unreviewed ID does not count; approval closes every open case
+q("UPDATE clients SET kyc='Verified' WHERE id=?", [$kc]); kyc_identity_changed($kc, 'name', (int)$super['id']);
+ok($kcr()['kyc'] === 'Pending' && (int)val("SELECT COUNT(*) FROM audit WHERE action='kyc_reopened' AND entity_id=?", [$kc]) === 1, 'changing identity details of a verified client sends it back to review');
+q("UPDATE clients SET kyc='Verified' WHERE id=?", [$kc]);
+$vNew = doc_add_version($kc, ['doc_type' => 'Passport', 'number' => 'KY999999', 'expires_on' => date('Y-m-d', strtotime('+4 years')), 'file_name' => $fname], 'upload_link', null);
+[$el, $why] = transfer_eligibility($kcr());
+ok(!$el && str_contains(implode(' ', $why), 'not been reviewed'), 'a newer ID that nobody reviewed blocks transfers until it is approved');
+q("INSERT INTO rekyc_cases (client_id, reason, status, due_date, open_key) VALUES (?, 'manual', 'in_progress', DATE_ADD(CURDATE(), INTERVAL 9 DAY), 'case-a'), (?, 'periodic', 'required', DATE_ADD(CURDATE(), INTERVAL 9 DAY), 'case-b')", [$kc, $kc]);
+as_user($super);
+$r = kyc_decide($kcr(), $super, array_merge($full, ['address_evidence' => 'Hydro bill 2026-10-02']) + ['code' => $code()]); $reset();
+ok($r[0] && (int)val("SELECT COUNT(*) FROM rekyc_cases WHERE client_id=? AND status IN ('required','in_progress','escalated')", [$kc]) === 0 && doc_current($kc)['outcome'] === 'verified' && transfer_eligibility($kcr())[0], 'approving the new ID closes every open case and allows transfers again');
+q("UPDATE document_versions SET outcome='verified' WHERE client_id=?", [$kc]);
 
 // ---- 14. eligibility policy ----
 q("UPDATE clients SET kyc='Verified' WHERE id=?", [$kc]);

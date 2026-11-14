@@ -70,7 +70,11 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
         $view = 'returning';
         if ((int)val("SELECT COUNT(*) FROM login_attempts WHERE ip=? AND username='returning' AND at > (NOW() - INTERVAL 1 HOUR)", [$ip]) >= 5) $errors[] = 'Too many tries. Please wait an hour or contact us on WhatsApp.';
         else {
-            $c = one("SELECT * FROM clients WHERE client_no=? AND kyc='Verified'", [strtoupper(trim(post('client_no')))]);
+            $cno = strtoupper(trim(post('client_no')));
+            $ckey = 'returning:' . substr(hash('sha256', $cno), 0, 40);
+            // per client as well as per connection: the client number is printed on receipts, so it is not a secret
+            $clientLocked = (int)val('SELECT COUNT(*) FROM login_attempts WHERE username=? AND at > (NOW() - INTERVAL 1 DAY)', [$ckey]) >= 5;
+            $c = $clientLocked ? null : one("SELECT * FROM clients WHERE client_no=? AND kyc='Verified'", [$cno]);
             $digits = $c ? preg_replace('/\D/', '', (string)($c['phone_e164'] ?: $c['phone'])) : '';
             $last4 = preg_replace('/\D/', '', post('last4'));
             if ($c && $c['dob'] && valid_date(post('dob')) === $c['dob'] && strlen($last4) === 4 && hash_equals(substr($digits, -4), $last4)) {
@@ -79,6 +83,8 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                 $view = 'returning_form';
             } else {
                 q("INSERT INTO login_attempts (ip, username) VALUES (?, 'returning')", [$ip]);
+                if (!$clientLocked) { q('INSERT INTO login_attempts (ip, username) VALUES (?, ?)', [$ip, $ckey]);
+                    if ((int)val('SELECT COUNT(*) FROM login_attempts WHERE username=? AND at > (NOW() - INTERVAL 1 DAY)', [$ckey]) === 5) { $cc = one('SELECT id FROM clients WHERE client_no=?', [$cno]); if ($cc) audit_write(null, 'returning_locked', 'client', $cc['id'], 'Returning-client check locked for 24 hours after 5 wrong tries', $ip); notify('Security: returning-client check locked', 'Five wrong identity checks for one client number in a day. The check is locked for 24 hours.', 'security_alert'); } }
                 $errors[] = 'We could not match those details. Check your client number (on your receipts), date of birth and phone digits.';
             }
         }
@@ -175,7 +181,7 @@ if ($done): ?>
 <?php elseif ($view === 'returning_form'): $c = one('SELECT * FROM clients WHERE id=?', [$_SESSION['returning']['id']]); $dv = doc_current((int)$c['id']); ?>
   <div class="card" style="max-width:620px;margin:0 auto">
     <h1>Welcome back, <?= e(explode(' ', $c['name'])[0]) ?></h1>
-    <p class="tag" style="margin-top:0">On file: phone ending <?= e(substr(preg_replace('/\D/', '', (string)$c['phone']), -4)) ?><?= $c['city'] ? ' · lives in ' . e($c['city']) : '' ?><?= $dv ? ' · ' . e($dv['doc_type'] ?: 'ID') . ($dv['expires_on'] ? ' valid until ' . e(date('M Y', strtotime($dv['expires_on']))) : '') : '' ?>. You don't need to enter these again.</p>
+    <p class="tag" style="margin-top:0">We have your details on file (phone ending <?= e(substr(preg_replace('/\D/', '', (string)$c['phone']), -4)) ?>). You don't need to enter them again: just tell us what changed.</p>
     <?php foreach ($errors as $er): ?><div class="banner bad"><?= e($er) ?></div><?php endforeach; ?>
     <form method="post" enctype="multipart/form-data"><?= csrf_field() ?><input type="hidden" name="act" value="returning_update">
       <span class="lbl">What has changed?</span>

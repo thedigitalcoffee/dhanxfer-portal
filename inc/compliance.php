@@ -9,8 +9,8 @@ require_once __DIR__ . '/kyc.php';
 
 /** Opens a KYC refresh case once per reason/document (open_key keeps it unique). Returns the case id. */
 function rekyc_open(int $clientId, string $reason, ?int $versionId, ?string $due, ?int $by, string $key): int {
-    q('INSERT IGNORE INTO rekyc_cases (client_id, reason, document_version_id, due_date, opened_by, open_key) VALUES (?,?,?,?,?,?)', [$clientId, $reason, $versionId, $due, $by, $key]);
-    $id = (int)db()->lastInsertId();
+    $ins = q('INSERT IGNORE INTO rekyc_cases (client_id, reason, document_version_id, due_date, opened_by, open_key) VALUES (?,?,?,?,?,?)', [$clientId, $reason, $versionId, $due, $by, $key]);
+    $id = $ins->rowCount() === 1 ? (int)db()->lastInsertId() : 0;
     if ($id) audit_write($by, 'rekyc_opened', 'client', $clientId, "case #$id · $reason", $by ? client_ip() : 'cron');
     return $id ?: (int)val('SELECT id FROM rekyc_cases WHERE open_key=?', [$key]);
 }
@@ -70,6 +70,9 @@ function compliance_daily(?string $today = null): array {
     // 4. deliver what is due (and retry failures)
     $r = reminders_send();
     $n['sent'] = $r['sent']; $n['failed'] = $r['failed'];
+    // saved registration drafts hold personal details: removed a day after they expire or are used
+    q('DELETE FROM intake_drafts WHERE expires_at < DATE_SUB(NOW(), INTERVAL 1 DAY) OR used_at < DATE_SUB(NOW(), INTERVAL 1 DAY)');
+    q('DELETE FROM upload_requests WHERE expires_at < DATE_SUB(NOW(), INTERVAL 90 DAY)');
     set_setting('compliance_last_run', $today . ' ' . date('H:i'));
     return $n;
 }

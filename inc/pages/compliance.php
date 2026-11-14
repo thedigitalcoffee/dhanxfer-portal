@@ -15,6 +15,10 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
         $n = compliance_daily();
         flash('Checks run: ' . $n['reminders_created'] . ' reminder(s), ' . $n['cases_opened'] . ' case(s) opened, ' . $n['escalated'] . ' escalated, ' . $n['sent'] . ' sent, ' . $n['failed'] . ' failed.');
     } elseif ($act === 'policy') {
+        // changing when transfers are blocked needs a fresh two-step code, like a KYC decision
+        require_once __DIR__ . '/../mfa.php';
+        $fresh = one('SELECT * FROM users WHERE id=?', [me()['id']]);
+        if (!$fresh['mfa_enabled'] || mfa_locked((int)$fresh['id']) || !mfa_check($fresh, post('code'))) { if ($fresh['mfa_enabled']) mfa_fail((int)$fresh['id']); flash('Enter a current two-step code to change compliance settings.', 'bad'); redirect('/?p=compliance&v=policy'); }
         $changes = [];
         foreach (array_keys(COMPLIANCE_DEFAULTS) as $k) {
             if (!isset($_POST[$k])) { if (str_starts_with($k, 'block_')) { $v = '0'; } else continue; }
@@ -28,6 +32,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
             $changes[] = 'reminders=' . implode(',', $offs);
         }
         audit('compliance_policy', 'settings', null, $changes ? implode('; ', $changes) : 'no change');
+        if ($changes) notify('Compliance settings changed', me()['username'] . ' changed compliance settings: ' . implode('; ', $changes), 'security_alert');
         flash($changes ? 'Compliance settings saved.' : 'Nothing changed.');
     }
     redirect('/?p=compliance&v=' . urlencode(get('v', 'pending')));
@@ -76,7 +81,7 @@ page_head('Compliance Center'); ?>
   <fieldset <?= $manage ? '' : 'disabled' ?>><legend>When transfers are blocked</legend>
     <?php foreach (['block_unverified' => 'KYC not approved', 'block_expired_doc' => 'ID expired (after the grace days below)', 'block_rekyc_overdue' => 'KYC refresh overdue'] as $k => $l): ?><label class="check" style="margin:6px 0"><input type="checkbox" name="<?= $k ?>" value="1" <?= setting($k) === '1' ? 'checked' : '' ?>><span><?= e($l) ?></span></label><?php endforeach; ?>
     <div class="f" style="max-width:260px"><label for="expired_grace_days">Grace days after expiry</label><input id="expired_grace_days" name="expired_grace_days" type="number" min="0" max="90" value="<?= e(setting('expired_grace_days')) ?>"></div></fieldset>
-  <?php if ($manage): ?><button class="btn gold">Save settings</button><?php endif; ?>
+  <?php if ($manage): ?><div class="f" style="max-width:260px;margin-bottom:12px"><label for="pcode">Your two-step code</label><input id="pcode" name="code" inputmode="numeric" autocomplete="one-time-code" required maxlength="11"></div><button class="btn gold">Save settings</button><?php endif; ?>
 </form>
 <?php else: ?>
 <div class="tablewrap"><table>

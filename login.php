@@ -17,7 +17,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
     if (!preg_match('/^[\p{L}\p{N}._@+-]{3,60}$/u', $username)) { q("INSERT INTO login_attempts (ip, username) VALUES (?, 'bad-id')", [client_ip()]); $username = 'bad-id'; }
     $password = $_POST['password'] ?? '';
     $ip = client_ip();
-    $win = "username NOT LIKE 'mfa:%' AND username NOT LIKE 'status-ref:%' AND username NOT IN ('status-check','install') AND at > (NOW() - INTERVAL 15 MINUTE)";
+    $win = "username NOT LIKE 'mfa:%' AND username NOT LIKE 'status-ref:%' AND username NOT LIKE 'returning%' AND username NOT IN ('status-check','install','addr-lookup') AND at > (NOW() - INTERVAL 15 MINUTE)";
     $ipFails = (int)val("SELECT COUNT(*) FROM login_attempts WHERE ip=? AND $win", [$ip]);
     $pairFails = (int)val("SELECT COUNT(*) FROM login_attempts WHERE ip=? AND username=? AND $win", [$ip, $username]);
     $userFails = (int)val("SELECT COUNT(*) FROM login_attempts WHERE username=? AND $win", [$username]);

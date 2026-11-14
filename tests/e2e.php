@@ -343,6 +343,9 @@ ok(str_contains($cl12->body, 'received securely') && (int)$dv12['version'] === 2
 if ($dv12['file_name']) $E2E_FILES[] = $dv12['file_name'];
 ok((int)val('SELECT COUNT(*) FROM document_versions WHERE client_id=?', [$kc]) === 2 && val("SELECT status FROM rekyc_cases WHERE client_id=? ORDER BY id DESC LIMIT 1", [$kc]) === 'in_progress', 'the first version is kept as history; the refresh case is in progress');
 $cl12b = new Browser(); $cl12b->req('/upload?t=' . ($um[1] ?? 'x')); ok(str_contains($cl12b->body, 'Link not available'), 'upload link works only once');
+[$el12, $why12] = transfer_eligibility(one('SELECT * FROM clients WHERE id=?', [$kc]));
+ok(!$el12 && str_contains(implode(' ', $why12), 'not been reviewed'), 'until the uploaded ID is reviewed, transfers stay blocked');
+$co12->post('/?p=compliance&v=policy', ['act' => 'policy', 'refresh_months_low' => '98', 'code' => '']); ok(setting('refresh_months_low') !== '98', 'compliance settings need a fresh two-step code');
 // public form: phone rules, address on ID, drafts, referral by login ID
 $pf12 = new Browser(); $pf12->req('/register?a=' . $a1['id'] . '&s=' . agent_sig((int)$a1['id']));
 ok(str_contains($pf12->body, 'referred by DhanXfer agent <strong>test.agent1'), 'signed agent link shows the login ID as the referral code');
@@ -372,11 +375,24 @@ $ret = new Browser(); $ret->req('/register?returning=1');
 $ret->req('/register', ['csrf' => $ret->csrf(), 'act' => 'returning', 'client_no' => (string)val('SELECT client_no FROM clients WHERE id=?', [$kc]), 'dob' => '1988-02-03', 'last4' => '7020']);
 ok(str_contains($ret->body, 'Welcome back') && !str_contains($ret->body, 'E2EKYC') && !str_contains($ret->body, '12 Main Street'), 'returning client is recognised and sees only masked hints');
 snap('returning', $ret->body);
+ok(!str_contains($ret->body, 'Toronto') && !str_contains($ret->body, 'Passport'), 'returning page shows no city or ID details, only the phone ending');
+$cno12 = (string)val('SELECT client_no FROM clients WHERE id=?', [$kc]);
+for ($i = 0; $i < 5; $i++) q('INSERT INTO login_attempts (ip, username) VALUES (?, ?)', ['198.51.100.' . $i, 'returning:' . substr(hash('sha256', $cno12), 0, 40)]);
+$ret2 = new Browser(); $ret2->req('/register?returning=1');
+$ret2->req('/register', ['csrf' => $ret2->csrf(), 'act' => 'returning', 'client_no' => $cno12, 'dob' => '1988-02-03', 'last4' => '7020']);
+ok(!str_contains($ret2->body, 'Welcome back'), 'after 5 wrong tries from other addresses the returning check for that client is locked');
+for ($i = 0; $i < 12; $i++) q("INSERT INTO login_attempts (ip, username) VALUES (?, 'addr-lookup')", [(string)val("SELECT ip FROM login_attempts WHERE username='returning' ORDER BY id DESC LIMIT 1") ?: '0.0.0.0']);
+$lg12 = new Browser(); $lg12->login('test.agent2'); $lg12->req('/');
+ok(str_contains($lg12->body, 'Log out'), 'address lookups and returning-client checks never lock staff out of logging in');
 // referral code = login ID; renaming keeps attribution
 $ad12 = $sa12; $ad12->post('/?p=agents', ['id' => $a1['id'], 'act' => 'rename', 'new_username' => 'test.agent1x']);
 ok(val('SELECT username FROM users WHERE id=?', [$a1['id']]) === 'test.agent1x' && (int)agent_by_code('test.agent1')['id'] === (int)$a1['id'], 'sub-agent renamed: the old code still credits the same agent');
 $ad12->post('/?p=agents', ['id' => $a2['id'], 'act' => 'rename', 'new_username' => 'test.agent1']);
 ok(val('SELECT username FROM users WHERE id=?', [$a2['id']]) === 'test.agent2', "another sub-agent cannot take the old code");
+// a sub-agent edits identity details of their verified client: back to review
+q("UPDATE clients SET kyc='Verified' WHERE id=?", [$kc]); q("UPDATE document_versions SET outcome='verified' WHERE client_id=?", [$kc]);
+$ag12->post("/?p=client_form&id=$kc", ['name' => 'E2E KYC Person Changed', 'phone' => '+1 416 555 7020', 'country' => 'Canada', 'office' => 'Canada', 'dob' => '1988-02-03', 'address' => '12 Main Street', 'city' => 'Toronto', 'postal' => 'M5H 2N2', 'consent' => '1', 'dupe_ok' => '1']);
+ok(val('SELECT kyc FROM clients WHERE id=?', [$kc]) === 'Pending', 'a sub-agent changing the name of a verified client sends it back to KYC review');
 q("UPDATE users SET username='test.agent1' WHERE id=?", [$a1['id']]); q("UPDATE agent_codes SET is_current=IF(code='test.agent1',1,0) WHERE agent_id=?", [$a1['id']]); q("DELETE FROM agent_codes WHERE code='test.agent1x'");
 q("UPDATE users SET role='admin' WHERE username='test.admin'");
 // ---- 10. phone-size layout snapshots (synthetic staging data) ----

@@ -20,8 +20,8 @@ if (setting('last_anchor_date') !== today()) {
 // Daily compliance checks: document expiry reminders, KYC refresh cases, escalation. Pending reminders retry every run.
 require_once __DIR__ . '/inc/compliance.php';
 if (setting('last_compliance_date') !== today() && (int)date('G') >= 7) {
-    set_setting('last_compliance_date', today());
     $c = compliance_daily();
+    set_setting('last_compliance_date', today()); // only after it worked, so a failed run is tried again next hour
     echo date('c') . ' compliance: ' . json_encode($c) . "\n";
 } else { $r = reminders_send(); if ($r['sent'] || $r['failed']) echo date('c') . ' reminder retries: ' . json_encode($r) . "\n"; }
 if (setting('rates_on', '1') !== '1' || !tg_token()) exit(0);

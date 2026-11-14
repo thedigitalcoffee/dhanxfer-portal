@@ -51,6 +51,15 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
             $sets[] = 'updated_at=NOW()';
             $par[] = $c['id'];
             q('UPDATE clients SET ' . implode(',', $sets) . ' WHERE id=?', $par);
+            // identity details of a verified client changed: back to review (a typo fix is quick to re-approve)
+            $idChanged = [];
+            foreach (['name' => 'name', 'dob' => 'date of birth', 'nationality' => 'nationality', 'address' => 'address', 'city' => 'address', 'province' => 'address', 'postal' => 'address', 'country' => 'address'] as $k => $label)
+                if (trim((string)$c[$k]) !== trim((string)nz($nv[$k]))) $idChanged[$label] = true;
+            if (($nv['phone_e164'] ?? null) && $nv['phone_e164'] !== $c['phone_e164']) $idChanged['phone'] = true;
+            if ($idChanged) {
+                kyc_identity_changed((int)$c['id'], implode(', ', array_keys($idChanged)), (int)$u['id']);
+                if ($c['kyc'] === 'Verified') flash('Identity details changed (' . implode(', ', array_keys($idChanged)) . '), so this client needs a new KYC review before more transfers.', 'warn');
+            }
             // ID changes become a new document version (history kept); a verified client goes back to review
             $old = ['id_type' => (string)$c['id_type'], 'id_number' => (string)dec($c['id_number']), 'id_country' => (string)$c['id_country'], 'id_expiry' => (string)$c['id_expiry']];
             $new = ['id_type' => $nv['id_type'], 'id_number' => $nv['id_number'] === '' && !$reveal ? $old['id_number'] : $nv['id_number'], 'id_country' => $nv['id_country'], 'id_expiry' => $nv['id_expiry']];
@@ -77,7 +86,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
 
 page_head($c ? 'Edit client' : 'New client'); ?>
 <div class="spread"><div><h1><?= $c ? 'Edit ' . e($c['name']) : 'New client' ?></h1>
-  <div class="muted"><?= $isAdmin ? 'Fields marked * are required.' : 'This client will be saved under your referral ID ' . e($u['ref_code']) . '. An admin checks the ID before the first transfer.' ?></div></div></div>
+  <div class="muted"><?= $isAdmin ? 'Fields marked * are required.' : 'This client will be saved under your referral code ' . e($u['username']) . '. An admin checks the ID before the first transfer.' ?></div></div></div>
 <?php foreach ($errors as $er): ?><div class="banner bad"><?= e($er) ?></div><?php endforeach; ?>
 <?php $wiz = $mode === 'agent' && !$c; ?>
 <form method="post" enctype="multipart/form-data"<?= $wiz ? ' class="wizard" novalidate' : '' ?>>

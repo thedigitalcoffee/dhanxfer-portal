@@ -4,6 +4,8 @@ defined('DX') or exit;
 if ($_SERVER['REQUEST_METHOD'] === 'POST' && post('act') !== 'reveal') {
     $s = one('SELECT * FROM submissions WHERE id=?', [(int)post('id')]);
     if (!$s || $s['status'] !== 'new') { flash('That form was already reviewed.', 'bad'); redirect('/?p=submissions'); }
+    // claim the form first, so two people clicking at once cannot both apply it
+    if (in_array(post('act'), ['approve', 'reject'], true) && !q("UPDATE submissions SET status='approved', reviewed_by=?, reviewed_at=NOW() WHERE id=? AND status='new'", [$u['id'], $s['id']])->rowCount()) { flash('That form was already reviewed.', 'bad'); redirect('/?p=submissions'); }
     $act = post('act');
     if ($act === 'reject') {
         q("UPDATE submissions SET status='rejected', reviewed_by=?, reviewed_at=NOW(), review_note=? WHERE id=?", [$u['id'], mb_substr(post('note'), 0, 250) ?: null, $s['id']]);
@@ -19,6 +21,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && post('act') !== 'reveal') {
         $chg = $d['changes'] ?? [];
         if (in_array('address', $chg, true) && trim($d['address'] ?? '') !== '') q("UPDATE clients SET address=?, city=?, province=?, postal=?, address_source='manual', updated_at=NOW() WHERE id=?", [$d['address'], $d['city'] ?: null, $d['province'] ?: null, $d['postal'] ?: null, $c['id']]);
         if (in_array('phone', $chg, true) && !empty($d['phone_e164'])) q('UPDATE clients SET phone=?, phone_e164=?, updated_at=NOW() WHERE id=?', [$d['phone'], $d['phone_e164'], $c['id']]);
+        if (array_intersect(['address', 'phone'], $chg)) kyc_identity_changed((int)$c['id'], implode(', ', array_intersect(['address', 'phone'], $chg)), (int)$u['id']);
         if (in_array('beneficiary', $chg, true) && trim($d['b_name'] ?? '') !== '') q('INSERT INTO beneficiaries (client_id,name,country,bank,account) VALUES (?,?,?,?,?)', [$c['id'], $d['b_name'], $d['b_country'] ?: null, $d['b_bank'] ?: null, enc($d['b_account'] ?: null)]);
         if (in_array('id', $chg, true) || in_array('address', $chg, true)) {
             if (in_array('id', $chg, true)) client_save_document((int)$c['id'], ['id_type' => $d['id_type'] ?? '', 'id_number' => $d['id_number'] ?? '', 'id_expiry' => valid_date($d['id_expiry'] ?? '') ?? '', 'id_country' => $c['id_country']], $s['id_file'], 'online', (int)$u['id']);
