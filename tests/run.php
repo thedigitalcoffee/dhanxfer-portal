@@ -9,9 +9,9 @@ require __DIR__ . '/../inc/bootstrap.php';
 require __DIR__ . '/../inc/clientform.php';
 require __DIR__ . '/../inc/rates.php';
 require __DIR__ . '/../inc/mfa.php';
-require __DIR__ . '/../inc/compliance.php';
-require __DIR__ . '/../inc/beneficiary.php';
-require __DIR__ . '/../inc/otp.php';
+require_once __DIR__ . '/../inc/compliance.php';
+require_once __DIR__ . '/../inc/beneficiary.php';
+require_once __DIR__ . '/../inc/otp.php';
 
 $pass = 0; $fail = 0; $out = []; $finished = false;
 // If anything crashes, still write what ran, plus the error, to the report.
