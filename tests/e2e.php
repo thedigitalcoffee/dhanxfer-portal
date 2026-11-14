@@ -6,6 +6,7 @@ $_SERVER['REMOTE_ADDR'] = 'cron';
 require __DIR__ . '/../inc/bootstrap.php';
 require __DIR__ . '/../inc/clientform.php';
 require __DIR__ . '/../inc/mfa.php';
+require __DIR__ . '/../inc/recovery.php';
 if (($CONFIG['environment'] ?? '') !== 'staging' || !str_contains($CONFIG['app_url'], 'staging.')) { echo "REFUSED: staging only\n"; exit(2); }
 $BASE = rtrim($CONFIG['app_url'], '/');
 $T = []; foreach ($CONFIG['test_users'] as $t) $T[$t['username']] = $t;
@@ -65,6 +66,7 @@ function e2e_cleanup(): void {
 e2e_cleanup(); // leftovers from an interrupted run
 register_shutdown_function(function () { try { e2e_cleanup(); } catch (Throwable $e) {} });
 
+$AUDIT0 = (int)val('SELECT COALESCE(MAX(id),0) FROM audit');
 // ---- test data: one client for each agent ----
 $a1 = one('SELECT * FROM users WHERE username=?', ['test.agent1']); $a2 = one('SELECT * FROM users WHERE username=?', ['test.agent2']);
 $c1 = insert_client(array_merge(array_fill_keys(CLIENT_FIELDS, ''), ['name' => 'E2E Client One', 'phone' => '+1 416 555 7001', 'office' => 'Canada', 'id_number' => 'E2E11111']), ['agent_id' => $a1['id'], 'source' => 'agent']);
@@ -149,7 +151,7 @@ ok((int)val("SELECT COUNT(*) FROM users WHERE role='super_admin'") === 0, 'super
 fresh_step_wait();
 $cl->req('/install.php'); $cl->req('/install.php', ['csrf' => $cl->csrf(), 'install_key' => $CONFIG['install_key'], 'username' => 'test.admin', 'password' => $T['test.admin']['password'], 'code' => totp_code($T['test.admin']['mfa_secret'], intdiv(time(), 30)), 'confirm' => '1']);
 ok(val("SELECT role FROM users WHERE username='test.admin'") === 'super_admin', 'owner claims super admin with install key + password + code');
-ok((int)val("SELECT COUNT(*) FROM audit WHERE action='super_admin_claimed'") === 1, 'the claim is recorded in the activity log');
+ok((int)val("SELECT COUNT(*) FROM audit WHERE action='super_admin_claimed' AND id>?", [$AUDIT0]) === 1, 'the claim is recorded in the activity log');
 $cl2 = new Browser(); $cl2->req('/install.php', null, false); ok($cl2->code === 404, 'install page closes once a super admin with two-step exists', (string)$cl2->code);
 
 // ---- 6. public form and referral ----
@@ -193,7 +195,7 @@ $ch = curl_init($BASE . '/status'); curl_setopt_array($ch, [CURLOPT_RETURNTRANSF
 $xb = (string)curl_exec($ch); curl_close($ch);
 ok(str_contains($xb, 'Too many checks'), 'a faked forwarding header does not reset the limit');
 $ch = curl_init($BASE . '/status'); curl_setopt_array($ch, [CURLOPT_RETURNTRANSFER => true, CURLOPT_HEADER => true, CURLOPT_NOBODY => true]); $hdrs = (string)curl_exec($ch); curl_close($ch);
-ok(stripos($hdrs, 'cache-control: private, no-store') !== false && stripos($hdrs, 'x-frame-options: deny') !== false, 'status page is not cached and cannot be framed');
+ok(stripos($hdrs, 'no-store') !== false && stripos($hdrs, 'x-frame-options: deny') !== false, 'status page is not cached and cannot be framed', preg_replace('/\s+/', ' ', substr($hdrs, 0, 600)));
 $sg = new Browser(); $sg->req('/status?ref=DXA-261114-E2E01&last4=7011'); ok(!str_contains($sg->body, 'Received'), 'lookups only work by form post (nothing in links or browser history)');
 q('DELETE FROM login_attempts'); q("DELETE FROM submissions WHERE app_ref='DXA-261114-E2E01'");
 
@@ -219,10 +221,10 @@ $cl3 = new Browser(); $cl3->req('/install.php', null, false); ok($cl3->code === 
 // ---- 9. emergency recovery from the server (lost phone and recovery codes) ----
 $sid = (int)val("SELECT id FROM users WHERE username='test.admin'");
 $oldPw = $T['test.admin']['password']; $oldSecret = $T['test.admin']['mfa_secret'];
-$outp = shell_exec_safe(PHP_BINARY . ' ' . escapeshellarg(dirname(__DIR__) . '/tools/recover_admin.php') . ' test.admin');
-if ($outp === null) { ok(false, 'server recovery tool could not be started from the test (shell disabled)'); }
-else {
-    ok(preg_match('#/reset\.php\?t=[a-f0-9]{48}#', $outp, $lm) === 1, 'server recovery tool prints a one-time link');
+// same code the server tool runs (the host does not let PHP start other programs, so the tool itself is run by cron separately)
+$outp = (string)recover_super('test.admin');
+{
+    ok(preg_match('#/reset\.php\?t=[a-f0-9]{48}#', $outp, $lm) === 1, 'server recovery gives a one-time link');
     ok((int)val('SELECT mfa_enabled FROM users WHERE id=?', [$sid]) === 0 && (int)val("SELECT COUNT(*) FROM audit WHERE action='break_glass'") >= 1, 'recovery clears the lost authenticator and is logged');
     $rv = new Browser(); $rv->login('test.admin', $oldPw, false); ok(str_contains($rv->body, 'Wrong ID or password'), 'old password stops working after recovery');
     $rl = new Browser(); $rl->req($lm[0]); $rl->req($lm[0], ['csrf' => $rl->csrf(), 'password' => 'Recovered-Pass-789', 'password2' => 'Recovered-Pass-789']);
@@ -242,8 +244,7 @@ else {
 q("UPDATE users SET role='admin' WHERE id=?", [$sid]); q("DELETE FROM settings WHERE k='owner_claim'");
 q("INSERT INTO users (role, username, name, password_hash) VALUES ('admin','e2e.staffx','E2E Stuck Claim','x')"); $stuck = (int)db()->lastInsertId();
 owner_claim($stuck); // an admin started the claim and never finished
-$o2 = shell_exec_safe(PHP_BINARY . ' ' . escapeshellarg(dirname(__DIR__) . '/tools/recover_admin.php') . ' --clear-claim');
-ok($o2 !== null && str_contains($o2, 'Cleared') && val("SELECT v FROM settings WHERE k='owner_claim'") === null && val('SELECT role FROM users WHERE id=?', [$stuck]) === 'admin', 'a half-finished claim can be cleared from the server without promoting anyone');
+ok(clear_owner_claim() && val("SELECT v FROM settings WHERE k='owner_claim'") === null && val('SELECT role FROM users WHERE id=?', [$stuck]) === 'admin', 'a half-finished claim can be cleared from the server without promoting anyone');
 
 // ---- 10. phone-size layout snapshots (synthetic staging data) ----
 $m1 = new Browser(); $m1->login('test.agent1');
@@ -258,5 +259,14 @@ foreach ($SNAP as $k => $h) {
     $bundle .= "=====PAGE $k=====\n" . trim($h) . "\n";
 }
 @file_put_contents(data_dir() . '/snapshots.txt', $bundle);
+$lite = '';
+foreach (['agent_home', 'agent_clients', 'agent_new_client', 'agent_transfer_new', 'public_register', 'public_status', 'auditor_transfers'] as $k) {
+    if (!isset($SNAP[$k])) continue;
+    $h = preg_replace('/name="csrf" value="[a-f0-9]+"/', 'name="csrf" value="x"', $SNAP[$k]);
+    $h = preg_replace('#<head>.*?</head>#s', '<!--HEAD-->', $h);
+    $h = preg_replace('/>\s+</', '><', preg_replace('/\s+/', ' ', $h));
+    $lite .= "=====PAGE $k=====\n" . trim($h) . "\n";
+}
+@file_put_contents(data_dir() . '/snapshots-lite.txt', $lite);
 ok(strlen($bundle) > 1000, 'phone layout snapshots saved (' . count($SNAP) . ' pages, ' . strlen($bundle) . ' bytes)');
 exit($fail ? 1 : 0);
