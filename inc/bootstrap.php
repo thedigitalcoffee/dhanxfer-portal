@@ -2,7 +2,10 @@
 declare(strict_types=1);
 define('DX', true);
 
-$CONFIG = require __DIR__ . '/config.php';
+$CONFIG = require __DIR__ . (defined('DX_TEST') ? '/config.test.php' : '/config.php');
+// Optional: secrets kept one level above public_html override the ones in inc/config.php.
+$__outside = dirname(__DIR__, 2) . '/dx-secrets.php';
+if (!defined('DX_TEST') && is_file($__outside)) { $__s = require $__outside; if (is_array($__s)) $CONFIG = array_merge($CONFIG, $__s); }
 date_default_timezone_set($CONFIG['timezone'] ?? 'America/Toronto');
 
 function is_https(): bool {
@@ -53,7 +56,7 @@ function db(): PDO {
     return $pdo;
 }
 
-const SCHEMA_VERSION = '3';
+const SCHEMA_VERSION = '4';
 /** Creates missing tables/columns after an upload of a newer version. Runs one cheap query per request. */
 function migrate(): void {
     $ver = null;
@@ -67,6 +70,13 @@ function migrate(): void {
         ['transfers', 'commission_currency', 'VARCHAR(5) NULL'],
     ];
     $cols[] = ['users', 'role', null];
+    array_push($cols,
+        ['users', 'mfa_secret', 'VARCHAR(255) NULL'], ['users', 'mfa_enabled', 'TINYINT(1) NOT NULL DEFAULT 0'],
+        ['users', 'mfa_recovery', 'TEXT NULL'], ['users', 'mfa_last_step', 'BIGINT NULL'],
+        ['clients', 'id_number_hash', 'CHAR(64) NULL'],
+        ['submissions', 'app_ref', 'VARCHAR(30) NULL'], ['submissions', 'ref_verified', 'TINYINT(1) NOT NULL DEFAULT 0'],
+        ['password_resets', 'purpose', "VARCHAR(20) NOT NULL DEFAULT 'reset'"],
+        ['audit', 'prev_hash', 'CHAR(64) NULL'], ['audit', 'row_hash', 'CHAR(64) NULL']);
     foreach ($cols as [$t, $c, $def]) {
         if ($def === null) continue;
         $has = db()->prepare('SELECT 1 FROM information_schema.COLUMNS WHERE TABLE_SCHEMA=DATABASE() AND TABLE_NAME=? AND COLUMN_NAME=?');
@@ -89,6 +99,23 @@ function migrate(): void {
     }
     foreach (['buy_pct' => '3', 'sell_pct' => '6', 'send_time' => '09:00', 'rates_on' => '1'] as $k => $v) {
         db()->prepare('INSERT IGNORE INTO settings (k, v) VALUES (?, ?)')->execute([$k, $v]);
+    }
+    // v4: Compliance Officer and Read-only Auditor get their default permissions once
+    if (!(int)db()->query("SELECT COUNT(*) FROM role_permissions WHERE role IN ('compliance','auditor')")->fetchColumn()) {
+        $ins = db()->prepare('INSERT IGNORE INTO role_permissions (role, perm) VALUES (?, ?)');
+        foreach (['compliance', 'auditor'] as $role) foreach (DEFAULT_PERMS[$role] as $perm) $ins->execute([$role, $perm]);
+        $ins->execute(['super_admin', 'pii.reveal']);
+    }
+    // v4: encrypt ID and account numbers that were saved before encryption existed
+    if (enc_ready()) {
+        foreach (db()->query("SELECT id, id_number FROM clients WHERE id_number IS NOT NULL AND id_number<>'' AND id_number NOT LIKE 'enc:%'")->fetchAll() as $r)
+            db()->prepare('UPDATE clients SET id_number=?, id_number_hash=? WHERE id=?')->execute([enc($r['id_number']), id_hash($r['id_number']), $r['id']]);
+        foreach (db()->query("SELECT id, account FROM beneficiaries WHERE account IS NOT NULL AND account<>'' AND account NOT LIKE 'enc:%'")->fetchAll() as $r)
+            db()->prepare('UPDATE beneficiaries SET account=? WHERE id=?')->execute([enc($r['account']), $r['id']]);
+        foreach (db()->query("SELECT id, data FROM submissions WHERE data NOT LIKE 'enc:%'")->fetchAll() as $r)
+            db()->prepare('UPDATE submissions SET data=? WHERE id=?')->execute([enc($r['data']), $r['id']]);
+        foreach (db()->query("SELECT id, mfa_secret FROM users WHERE mfa_secret IS NOT NULL AND mfa_secret NOT LIKE 'enc:%'")->fetchAll() as $r)
+            db()->prepare('UPDATE users SET mfa_secret=? WHERE id=?')->execute([enc($r['mfa_secret']), $r['id']]);
     }
     db()->prepare("REPLACE INTO settings (k, v) VALUES ('schema_version', ?)")->execute([SCHEMA_VERSION]);
 }
@@ -152,23 +179,27 @@ function new_transfer_no(): string {
 
 /* ---------- auth ---------- */
 function me(): ?array {
-    static $u = false;
-    if ($u === false) {
-        $u = null;
-        if (!empty($_SESSION['uid'])) {
-            $u = one('SELECT * FROM users WHERE id=? AND active=1', [$_SESSION['uid']]);
-            if (!$u || (int)$u['session_version'] !== (int)($_SESSION['sv'] ?? -1)) { $u = null; session_unset(); }
-        }
+    static $cache = [];
+    $uid = (int)($_SESSION['uid'] ?? 0);
+    if (!$uid) return null;
+    $key = $uid . ':' . (int)($_SESSION['sv'] ?? -1);
+    if (!array_key_exists($key, $cache)) {
+        $u = one('SELECT * FROM users WHERE id=? AND active=1', [$uid]);
+        if (!$u || (int)$u['session_version'] !== (int)($_SESSION['sv'] ?? -1)) { $u = null; unset($_SESSION['uid'], $_SESSION['sv']); }
+        $cache = [$key => $u];
     }
-    return $u;
+    return $cache[$key];
 }
 /* ---------- roles & permissions ---------- */
-const ROLES = ['super_admin' => 'Super admin', 'admin' => 'Admin', 'staff' => 'Operations staff', 'accountant' => 'Accountant', 'agent' => 'Sub-agent'];
+const ROLES = ['super_admin' => 'Super admin', 'admin' => 'Admin / Operations manager', 'compliance' => 'Compliance officer', 'staff' => 'Operations staff', 'accountant' => 'Accountant', 'auditor' => 'Read-only auditor', 'agent' => 'Sub-agent'];
+/** Roles that must use two-step login (authenticator app). */
+const MFA_REQUIRED = ['super_admin', 'admin', 'compliance'];
 const PERMS = [
     'clients.all' => 'See all clients and transfers',
     'clients.edit' => 'Add and edit clients',
     'clients.delete' => 'Delete clients',
     'kyc.decide' => 'Verify or reject KYC',
+    'pii.reveal' => 'See full ID and bank account numbers (each look is logged)',
     'submissions.review' => 'Review online registration forms',
     'transfers.create' => 'Create transfers',
     'transfers.decide' => 'Accept, reject and complete transfers',
@@ -184,7 +215,9 @@ const PERMS = [
     'audit.all' => "See everyone's activity history",
 ];
 const DEFAULT_PERMS = [
-    'admin' => ['clients.all', 'clients.edit', 'kyc.decide', 'submissions.review', 'transfers.create', 'transfers.decide', 'rates.set', 'commission.view', 'team.agents', 'log.use', 'export', 'audit.all'],
+    'admin' => ['clients.all', 'clients.edit', 'submissions.review', 'transfers.create', 'transfers.decide', 'rates.set', 'commission.view', 'team.agents', 'log.use', 'export', 'audit.all'],
+    'compliance' => ['clients.all', 'kyc.decide', 'pii.reveal', 'submissions.review', 'audit.all', 'export'],
+    'auditor' => ['clients.all', 'commission.view', 'audit.all', 'export'],
     'staff' => ['clients.all', 'clients.edit', 'submissions.review', 'transfers.create', 'log.use'],
     'accountant' => ['clients.all', 'commission.view', 'export'],
 ];
@@ -214,9 +247,82 @@ function require_login(): array {
 
 function audit(string $action, string $entity = '', $entityId = null, string $detail = ''): void {
     $u = me();
-    q('INSERT INTO audit (user_id, action, entity, entity_id, detail, ip) VALUES (?,?,?,?,?,?)',
-        [$u['id'] ?? null, $action, $entity, $entityId, mb_substr($detail, 0, 500), client_ip()]);
+    audit_write($u['id'] ?? null, $action, $entity, $entityId, $detail, client_ip());
 }
+/**
+ * Every activity-log row is chained to the one before it with an HMAC, so editing or deleting
+ * a row in the database breaks the chain and shows up on the Activity history check.
+ */
+function audit_write(?int $userId, string $action, string $entity, $entityId, string $detail, string $ip): void {
+    $detail = mb_substr($detail, 0, 500);
+    $lock = (int)db()->query("SELECT GET_LOCK('dx_audit', 5)")->fetchColumn();
+    try {
+        $prev = (string)(db()->query('SELECT row_hash FROM audit ORDER BY id DESC LIMIT 1')->fetchColumn() ?: '');
+        $at = date('Y-m-d H:i:s');
+        $hash = audit_hash($prev, $userId, $action, $entity, $entityId, $detail, $ip, $at);
+        q('INSERT INTO audit (user_id, action, entity, entity_id, detail, ip, created_at, prev_hash, row_hash) VALUES (?,?,?,?,?,?,?,?,?)',
+            [$userId, $action, $entity, $entityId, $detail, $ip, $at, $prev ?: null, $hash]);
+    } finally { if ($lock) db()->query("SELECT RELEASE_LOCK('dx_audit')"); }
+}
+function audit_hash(string $prev, $userId, string $action, ?string $entity, $entityId, ?string $detail, ?string $ip, string $at): string {
+    return hash_hmac('sha256', implode('|', [$prev, (string)$userId, $action, (string)$entity, (string)$entityId, (string)$detail, (string)$ip, $at]), sec_key('audit'));
+}
+/** Checks the whole chain. Returns [rows checked, first broken row id or null, rows written before the chain existed]. */
+function audit_verify(): array {
+    $prev = ''; $n = 0; $legacy = 0;
+    $st = db()->query('SELECT * FROM audit ORDER BY id');
+    while ($r = $st->fetch()) {
+        if ($r['row_hash'] === null) { $legacy++; continue; }
+        $n++;
+        if ((string)$r['prev_hash'] !== $prev) return [$n, (int)$r['id'], $legacy];
+        if (!hash_equals($r['row_hash'], audit_hash((string)$r['prev_hash'], $r['user_id'], $r['action'], $r['entity'], $r['entity_id'], $r['detail'], $r['ip'], $r['created_at']))) return [$n, (int)$r['id'], $legacy];
+        $prev = $r['row_hash'];
+    }
+    return [$n, null, $legacy];
+}
+
+/* ---------- encryption, masking, signing ---------- */
+function master_key(): string {
+    global $CONFIG;
+    $k = base64_decode((string)($CONFIG['enc_key'] ?? ''), true);
+    if ($k === false || strlen($k) !== 32) throw new RuntimeException('The encryption key is missing from the server config.');
+    return $k;
+}
+function enc_ready(): bool { try { master_key(); return true; } catch (Throwable $e) { return false; } }
+/** A separate key for each job, derived from the master key. */
+function sec_key(string $purpose): string { return hash_hmac('sha256', 'dhanxfer:' . $purpose, master_key(), true); }
+function enc(?string $plain): ?string {
+    if ($plain === null || $plain === '') return $plain;
+    if (str_starts_with($plain, 'enc:v1:')) return $plain;
+    $nonce = random_bytes(SODIUM_CRYPTO_SECRETBOX_NONCEBYTES);
+    return 'enc:v1:' . base64_encode($nonce . sodium_crypto_secretbox($plain, $nonce, sec_key('data')));
+}
+function dec(?string $stored): ?string {
+    if ($stored === null || !str_starts_with($stored, 'enc:v1:')) return $stored;
+    $raw = base64_decode(substr($stored, 7), true);
+    if ($raw === false || strlen($raw) < SODIUM_CRYPTO_SECRETBOX_NONCEBYTES + 1) return null;
+    $p = sodium_crypto_secretbox_open(substr($raw, SODIUM_CRYPTO_SECRETBOX_NONCEBYTES), substr($raw, 0, SODIUM_CRYPTO_SECRETBOX_NONCEBYTES), sec_key('data'));
+    return $p === false ? null : $p;
+}
+/** Exact-match search key for an ID number, without storing it readable. */
+function id_hash(?string $idNo): ?string {
+    $n = strtoupper(preg_replace('/[^A-Za-z0-9]/', '', (string)$idNo));
+    return $n === '' ? null : hash_hmac('sha256', $n, sec_key('idhash'));
+}
+/** "•••• 4821": shows only the last 4 characters. */
+function mask(?string $v, int $keep = 4): string {
+    $v = trim((string)$v);
+    if ($v === '') return '';
+    $len = mb_strlen($v);
+    return $len <= $keep ? str_repeat('•', $len) : '•••• ' . mb_substr($v, -$keep);
+}
+/** Signed client-registration link for a sub-agent. The signature stops clients changing the referral code. */
+function ref_sig(string $code): string { return substr(hash_hmac('sha256', strtoupper($code), sec_key('ref')), 0, 16); }
+function referral_link(string $code): string {
+    global $CONFIG;
+    return rtrim($CONFIG['app_url'], '/') . '/register?ref=' . rawurlencode($code) . '&s=' . ref_sig($code);
+}
+function ref_valid(string $code, string $sig): bool { return $code !== '' && $sig !== '' && hash_equals(ref_sig($code), $sig); }
 /** Can the current user see this client row? */
 function can_see_client(array $c): bool {
     $u = me();
@@ -224,6 +330,17 @@ function can_see_client(array $c): bool {
     if ($u['role'] === 'agent') return (int)$c['agent_id'] === (int)$u['id'];
     return role_can($u['role'], 'clients.all');
 }
+/**
+ * Data ownership in one place, used by every list and every single-record page:
+ * sub-agents see only clients and transfers credited to them; internal roles need clients.all.
+ * Returns [sql condition, params] for a table alias with an agent_id column.
+ */
+function scope_where(?array $u, string $alias): array {
+    if (!$u) return ['1=0', []];
+    if ($u['role'] === 'agent') return ["$alias.agent_id=?", [(int)$u['id']]];
+    return role_can($u['role'], 'clients.all') ? ['1=1', []] : ['1=0', []];
+}
+function can_see_transfer(array $t): bool { return can_see_client(['agent_id' => $t['agent_id']]); }
 function gen_password(int $len = 12): string {
     $chars = 'ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz23456789';
     $p = '';
@@ -231,11 +348,14 @@ function gen_password(int $len = 12): string {
     return $p;
 }
 /** One-time password reset link, valid 24 hours. Returns the full URL (token is stored hashed). */
-function make_reset_link(int $userId, int $byId): string {
+function make_reset_link(int $userId, int $byId, string $purpose = 'reset'): string {
     global $CONFIG;
+    if ((int)val('SELECT COUNT(*) FROM password_resets WHERE user_id=? AND created_at > (NOW() - INTERVAL 1 HOUR)', [$userId]) >= 5)
+        throw new RuntimeException('Too many links were made for this person in the last hour. Try again later.');
     $tok = bin2hex(random_bytes(24));
+    $hours = $purpose === 'activate' ? 72 : 24;
     q('UPDATE password_resets SET used_at=NOW() WHERE user_id=? AND used_at IS NULL', [$userId]);
-    q('INSERT INTO password_resets (user_id, token_hash, expires_at, created_by) VALUES (?,?,DATE_ADD(NOW(), INTERVAL 24 HOUR),?)', [$userId, hash('sha256', $tok), $byId]);
+    q("INSERT INTO password_resets (user_id, token_hash, expires_at, created_by, purpose) VALUES (?,?,DATE_ADD(NOW(), INTERVAL $hours HOUR),?,?)", [$userId, hash('sha256', $tok), $byId, $purpose]);
     return rtrim($CONFIG['app_url'], '/') . '/reset.php?t=' . $tok;
 }
 function next_ref_code(): string {

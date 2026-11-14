@@ -27,12 +27,12 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
         if ($ref !== null && !preg_match('/^[A-Z0-9-]{3,20}$/', $ref)) $err[] = 'Referral ID: 3–20 letters, numbers or dashes.';
         elseif ($ref !== null && val('SELECT 1 FROM users WHERE ref_code=?', [$ref])) $err[] = 'That referral ID is already used.';
         if ($err) { foreach ($err as $x) flash($x, 'bad'); redirect('/?p=agents'); }
-        $pw = gen_password();
-        q('INSERT INTO users (role,username,name,phone,email,office,ref_code,commission_note,password_hash,must_change_password,created_by) VALUES (?,?,?,?,?,?,?,?,?,1,?)',
-            [$role, $username, $name, post('phone') ?: null, post('email') ?: null, in_array(post('office'), OFFICES, true) ? post('office') : null, $ref, mb_substr(post('commission_note'), 0, 250) ?: null, password_hash($pw, PASSWORD_DEFAULT), $u['id']]);
+        // Nobody knows this random password: the person sets their own through the activation link.
+        q('INSERT INTO users (role,username,name,phone,email,office,ref_code,commission_note,password_hash,must_change_password,created_by) VALUES (?,?,?,?,?,?,?,?,?,0,?)',
+            [$role, $username, $name, post('phone') ?: null, post('email') ?: null, in_array(post('office'), OFFICES, true) ? post('office') : null, $ref, mb_substr(post('commission_note'), 0, 250) ?: null, password_hash(bin2hex(random_bytes(32)), PASSWORD_DEFAULT), $u['id']]);
         $nid = (int)db()->lastInsertId();
         audit('create_user', 'user', $nid, "$role $username");
-        $_SESSION['show_secret'] = ['name' => $name, 'username' => $username, 'password' => $pw, 'ref' => $ref];
+        $_SESSION['show_link'] = ['name' => $name, 'username' => $username, 'link' => make_reset_link($nid, (int)$u['id'], 'activate'), 'purpose' => 'activate', 'ref' => $ref];
         redirect('/?p=agents&id=' . $nid);
     }
     $target = one('SELECT * FROM users WHERE id=?', [(int)post('id')]);
@@ -58,16 +58,16 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
             foreach ($ids as $r) apply_commission((int)$r['id']);
             flash('Commission rates saved and applied to ' . count($ids) . ' earlier transfer(s) that had none.');
         } else flash('Commission rates saved. New accepted transfers use them.');
-    } elseif ($act === 'reset') {
-        $pw = gen_password();
-        q('UPDATE users SET password_hash=?, must_change_password=1, session_version=session_version+1 WHERE id=?', [password_hash($pw, PASSWORD_DEFAULT), $target['id']]);
-        audit('reset_password', 'user', $target['id'], $target['username']);
-        $_SESSION['show_secret'] = ['name' => $target['name'], 'username' => $target['username'], 'password' => $pw, 'ref' => $target['ref_code']];
     } elseif ($act === 'reset_link') {
-        $link = make_reset_link((int)$target['id'], (int)$u['id']);
+        try { $link = make_reset_link((int)$target['id'], (int)$u['id'], $target['last_login'] ? 'reset' : 'activate'); }
+        catch (RuntimeException $ex) { flash($ex->getMessage(), 'bad'); redirect('/?p=agents&id=' . $target['id']); }
         q('UPDATE users SET session_version=session_version+1 WHERE id=?', [$target['id']]);
         audit('reset_link', 'user', $target['id'], $target['username']);
-        $_SESSION['show_link'] = ['name' => $target['name'], 'username' => $target['username'], 'link' => $link];
+        $_SESSION['show_link'] = ['name' => $target['name'], 'username' => $target['username'], 'link' => $link, 'purpose' => $target['last_login'] ? 'reset' : 'activate', 'ref' => $target['ref_code']];
+    } elseif ($act === 'mfa_reset' && is_super()) {
+        q('UPDATE users SET mfa_enabled=0, mfa_secret=NULL, mfa_recovery=NULL, session_version=session_version+1 WHERE id=?', [$target['id']]);
+        audit('mfa_reset', 'user', $target['id'], $target['username']);
+        flash('Two-step login was reset. ' . $target['name'] . ' sets it up again at the next login.');
     } elseif ($act === 'role') {
         $nr = post('role');
         if (!in_array($nr, manageable_roles(), true) || $target['role'] === 'agent' || $nr === 'agent') { flash('That role change is not allowed.', 'bad'); redirect('/?p=agents&id=' . $target['id']); }
@@ -100,19 +100,12 @@ if (get('id') !== '') {
     <div class="spread"><div><div class="tag"><?= e(role_label($a['role'])) ?> · login ID <strong><?= e($a['username']) ?></strong></div><h1><?= e($a['name']) ?></h1>
       <div class="row" style="margin-top:6px"><?= $a['active'] ? '<span class="pill p-ok">Active</span>' : '<span class="pill p-bad">Switched off</span>' ?><?php if ($isAgent): ?><span class="pill p-gold"><?= e($a['ref_code']) ?></span><?php endif; ?></div></div>
       <a class="btn" href="/?p=agents">Back to team</a></div>
-    <?php if ($secret): ?>
+    <?php if ($showLink): $act = ($showLink['purpose'] ?? '') === 'activate';
+      $lmsg = $act ? "Welcome to DhanXfer, {$showLink['name']}! Open this link to set your password and activate your portal account. It works once and expires in 72 hours:\n{$showLink['link']}\nYour login ID: {$showLink['username']}" . (!empty($showLink['ref']) ? "\nYour agent code: {$showLink['ref']}" : '')
+                   : "Hi {$showLink['name']}, use this link to set a new password for the DhanXfer portal. It works once and expires in 24 hours:\n{$showLink['link']}\nYour login ID: {$showLink['username']}"; ?>
       <div class="card" style="border-color:var(--gold)">
-        <h2 style="margin-bottom:8px">Login details for <?= e($secret['name']) ?></h2>
-        <p class="tag" style="margin-top:0">Copy these now and send them privately (for example on WhatsApp). The password is shown only once. They must choose a new password the first time they log in.</p>
-        <?php $msg = "DhanXfer portal login\nLink: $base/login.php\nLogin ID: {$secret['username']}\nTemporary password: {$secret['password']}" . ($secret['ref'] ? "\nYour referral ID: {$secret['ref']}\nYour client link: $base/register.php?ref={$secret['ref']}" : ''); ?>
-        <div class="secret" style="white-space:pre-wrap"><?= e($msg) ?></div>
-        <div class="row" style="margin-top:10px"><button type="button" class="btn gold" data-copy="<?= e($msg) ?>">Copy login details</button></div>
-      </div>
-    <?php endif; ?>
-    <?php if ($showLink): $lmsg = "Hi {$showLink['name']}, use this link to set a new password for the DhanXfer portal. It works once and expires in 24 hours:\n{$showLink['link']}\nYour login ID: {$showLink['username']}"; ?>
-      <div class="card" style="border-color:var(--gold)">
-        <h2 style="margin-bottom:8px">Password reset link for <?= e($showLink['name']) ?></h2>
-        <p class="tag" style="margin-top:0">Send this privately. It works one time only and expires in 24 hours. Their old password has stopped working.</p>
+        <h2 style="margin-bottom:8px"><?= $act ? 'Activation link' : 'Password reset link' ?> for <?= e($showLink['name']) ?></h2>
+        <p class="tag" style="margin-top:0">Send this privately. It works one time only and expires in <?= $act ? '72' : '24' ?> hours. They choose their own password; nobody else ever sees it.</p>
         <div class="secret"><?= e($showLink['link']) ?></div>
         <div class="row" style="margin-top:10px"><button type="button" class="btn gold" data-share="<?= e($showLink['link']) ?>" data-share-text="<?= e($lmsg) ?>">Share</button>
           <a class="btn" href="https://wa.me/<?= e(preg_replace('/\D/', '', (string)$a['phone'])) ?>?text=<?= e(rawurlencode($lmsg)) ?>" target="_blank" rel="noopener">Send on WhatsApp</a>
@@ -127,7 +120,7 @@ if (get('id') !== '') {
           <a class="tile" href="/?p=transfers&agent=<?= (int)$a['id'] ?>"><div class="k">Accepted transfers</div><div class="v num"><?= (int)$stats['tx'] ?></div></a>
           <a class="tile <?= $stats['pend'] ? 'alert' : '' ?>" href="/?p=transfers&status=pending&agent=<?= (int)$a['id'] ?>"><div class="k">Waiting for you</div><div class="v num"><?= (int)$stats['pend'] ?></div></a>
         </div>
-        <?php share_block("$base/register?ref={$a['ref_code']}", $a['ref_code'], 'Personal client registration link'); ?>
+        <?php share_block(referral_link((string)$a['ref_code']), $a['ref_code'], 'Personal client registration link'); ?>
         <h2 style="margin-bottom:10px">Monthly volume (for commission)</h2>
         <div class="tablewrap"><table><thead><tr><th>Month</th><th class="r">Transfers</th><th class="r">Volume</th><th class="r">Fees</th></tr></thead><tbody>
         <?php foreach ($vol as $r): ?><tr><td><?= e(date('F Y', strtotime($r['m'] . '-01'))) ?></td><td class="r num"><?= (int)$r['n'] ?></td><td class="r num"><?= e(money($r['s'], $r['send_currency'] ?? '')) ?></td><td class="r num"><?= e(money($r['f'], $r['send_currency'] ?? '')) ?></td></tr><?php endforeach; ?>
@@ -163,9 +156,9 @@ if (get('id') !== '') {
           <h3 style="margin-bottom:10px">Access</h3>
           <p class="tag" style="margin-top:0">Last login: <?= $a['last_login'] ? fdatetime($a['last_login']) : 'never' ?></p>
           <?php if ((int)$a['id'] !== (int)$u['id']): ?>
-          <p class="tag">Reset link: they open it and choose their own new password (works once, 24 hours). Temporary password: you get a password to send them, and they must change it when they log in.</p>
-          <div class="row"><button class="btn gold" name="act" value="reset_link" data-confirm="Create a one-time reset link for <?= e($a['name']) ?>? Their current password stops working.">Create reset link</button>
-          <button class="btn" name="act" value="reset" data-confirm="Make a new temporary password for <?= e($a['name']) ?>? Their old password stops working.">Temporary password</button><?= $a['active'] ? '<button class="btn danger" name="act" value="disable" data-confirm="Switch off this account? They will be logged out.">Switch off login</button>' : '<button class="btn ok" name="act" value="enable">Switch login back on</button>' ?></div>
+          <p class="tag"><?= $a['last_login'] ? 'A reset link lets them choose a new password (works once, 24 hours). Their current password stops working straight away.' : 'They have not activated their account yet. A new activation link replaces the old one (works once, 72 hours).' ?> Two-step login: <?= $a['mfa_enabled'] ? 'on' : 'off' ?>.</p>
+          <div class="row"><button class="btn gold" name="act" value="reset_link" data-confirm="Create a new one-time link for <?= e($a['name']) ?>?"><?= $a['last_login'] ? 'Create reset link' : 'New activation link' ?></button>
+          <?php if (is_super() && $a['mfa_enabled']): ?><button class="btn" name="act" value="mfa_reset" data-confirm="Turn off two-step login for <?= e($a['name']) ?> so they can set it up again (for a lost phone)?">Reset two-step login</button><?php endif; ?><?= $a['active'] ? '<button class="btn danger" name="act" value="disable" data-confirm="Switch off this account? They will be logged out.">Switch off login</button>' : '<button class="btn ok" name="act" value="enable">Switch login back on</button>' ?></div>
           <?php else: ?><p class="tag">This is you. Change your password under <a href="/?p=account">My account</a>.</p><?php endif; ?>
         </form>
         <?php $roleOpts = array_values(array_filter(manageable_roles(), fn($x) => $x !== 'agent')); if (!$isAgent && (int)$a['id'] !== (int)$u['id'] && $roleOpts): ?>
@@ -202,7 +195,7 @@ page_head('Team & sub-agents'); ?>
       <div class="f"><label for="noffice">Office</label><select id="noffice" name="office"><?= opts(OFFICES, '') ?></select></div>
       <div class="f wide"><label for="ncomm">Commission terms (optional, only admins see this)</label><input id="ncomm" name="commission_note" placeholder="e.g. 0.5% of volume, paid monthly"></div>
     </div>
-    <p class="tag">A temporary password is created for them and shown once on the next screen.</p>
+    <p class="tag">You get a one-time activation link to send them. They choose their own password; no temporary password is ever sent.</p>
     <button class="btn gold" name="act" value="create">Create login</button>
   </form>
 </div>

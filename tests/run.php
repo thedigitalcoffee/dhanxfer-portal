@@ -1,0 +1,136 @@
+<?php
+// Automated checks for Phase 1. Command line only, against the separate TEST database (wiped each run).
+// Run on the server:  php tests/run.php
+if (PHP_SAPI !== 'cli') { http_response_code(404); exit; }
+define('DX_TEST', true);
+$_SERVER['REMOTE_ADDR'] = '127.0.0.1';
+require __DIR__ . '/../inc/bootstrap.php';
+require __DIR__ . '/../inc/clientform.php';
+require __DIR__ . '/../inc/rates.php';
+require __DIR__ . '/../inc/mfa.php';
+
+$pass = 0; $fail = 0; $out = [];
+function ok(bool $cond, string $name) { global $pass, $fail, $out; $cond ? $pass++ : $fail++; $out[] = ($cond ? 'ok     ' : 'FAILED ') . $name; }
+function as_user(?array $u) { $_SESSION['uid'] = $u['id'] ?? 0; $_SESSION['sv'] = $u['session_version'] ?? 0; }
+function mkuser(string $role, string $name, ?string $ref = null): array {
+    q('INSERT INTO users (role, username, name, ref_code, password_hash, must_change_password) VALUES (?,?,?,?,?,0)', [$role, strtolower(str_replace(' ', '.', $name)) . bin2hex(random_bytes(2)), $name, $ref, password_hash('x', PASSWORD_DEFAULT)]);
+    return one('SELECT * FROM users WHERE id=?', [(int)db()->lastInsertId()]);
+}
+
+// ---- fresh test database ----
+$tables = db()->query('SHOW TABLES')->fetchAll(PDO::FETCH_COLUMN);
+db()->exec('SET FOREIGN_KEY_CHECKS=0');
+foreach ($tables as $t) db()->exec("DROP TABLE `$t`");
+migrate();
+ok((string)setting('schema_version') === SCHEMA_VERSION, 'database builds from scratch to schema ' . SCHEMA_VERSION);
+
+$super = mkuser('super_admin', 'Test Super'); $admin = mkuser('admin', 'Test Admin'); $comp = mkuser('compliance', 'Test Compliance');
+$staff = mkuser('staff', 'Test Staff'); $acct = mkuser('accountant', 'Test Accountant'); $aud = mkuser('auditor', 'Test Auditor');
+$agA = mkuser('agent', 'Agent A', 'SA-1001'); $agB = mkuser('agent', 'Agent B', 'SA-1002');
+$base = ['name' => 'Client', 'phone' => '+1 416 555 0101', 'office' => 'Canada', 'id_number' => 'P1234567', 'id_type' => 'Passport'];
+$cA = insert_client(array_merge(array_fill_keys(CLIENT_FIELDS, ''), $base, ['name' => 'Client of A']), ['agent_id' => $agA['id'], 'source' => 'agent']);
+$cB = insert_client(array_merge(array_fill_keys(CLIENT_FIELDS, ''), $base, ['name' => 'Client of B', 'phone' => '+1 416 555 0202', 'id_number' => 'X9988776']), ['agent_id' => $agB['id'], 'source' => 'agent']);
+$rowA = one('SELECT * FROM clients WHERE id=?', [$cA]); $rowB = one('SELECT * FROM clients WHERE id=?', [$cB]);
+
+// ---- 1. cross-agent isolation ----
+as_user($agA);
+ok(can_see_client($rowA), 'agent A sees own client');
+ok(!can_see_client($rowB), "agent A cannot see agent B's client");
+[$w, $p] = scope_where(me(), 'c');
+$ids = array_column(all("SELECT c.id FROM clients c WHERE $w", $p), 'id');
+ok($ids === [(string)$cA] || $ids === [$cA], 'agent A client list holds only own client');
+q("INSERT INTO transfers (ref_no, client_id, client_name, agent_id, send_amount, send_currency, receive_currency, transfer_date, status) VALUES ('T1',?,?,?,1000,'CAD','INR',CURDATE(),'accepted'),('T2',?,?,?,500,'CAD','INR',CURDATE(),'pending')", [$cA, 'Client of A', $agA['id'], $cB, 'Client of B', $agB['id']]);
+[$w, $p] = scope_where(me(), 't');
+ok(array_column(all("SELECT t.ref_no FROM transfers t WHERE $w", $p), 'ref_no') === ['T1'], 'agent A transfer list holds only own transfers');
+ok(!can_see_transfer(one("SELECT * FROM transfers WHERE ref_no='T2'")), "agent A cannot open agent B's transfer");
+as_user($agB);
+ok(!can_see_client($rowA), "agent B cannot see agent A's client");
+as_user(null);
+ok(!can_see_client($rowA) && scope_where(me(), 'c')[0] === '1=0', 'logged-out visitor sees no clients');
+
+// ---- 2. role permissions ----
+foreach ([$staff, $admin, $comp, $acct, $aud, $super] as $x) { as_user($x); ok(can_see_client($rowA) && can_see_client($rowB), role_label($x['role']) . ' sees all clients'); }
+ok(!role_can('agent', 'kyc.decide') && !role_can('agent', 'transfers.decide') && !role_can('agent', 'audit.all') && !role_can('agent', 'pii.reveal'), 'sub-agent has no approval, audit or reveal rights');
+ok(role_can('compliance', 'kyc.decide') && !role_can('admin', 'kyc.decide'), 'KYC decisions belong to Compliance, not Admin (default)');
+$edit = ['clients.edit', 'clients.delete', 'kyc.decide', 'transfers.create', 'transfers.decide', 'rates.set', 'rates.settings', 'commission.set', 'team.agents', 'team.staff', 'log.use', 'import', 'submissions.review'];
+ok(!array_intersect($edit, role_perms('auditor')), 'Read-only auditor has no editing permission');
+ok(role_can('auditor', 'audit.all') && role_can('auditor', 'clients.all'), 'auditor can read clients and the activity log');
+ok(count(role_perms('super_admin')) === count(PERMS), 'super admin has every permission');
+ok(!role_can('staff', 'transfers.decide'), 'operations staff cannot accept transfers');
+
+// ---- 3. encryption and masking ----
+ok(str_starts_with((string)$rowA['id_number'], 'enc:v1:') && dec($rowA['id_number']) === 'P1234567', 'ID number stored encrypted and decrypts');
+ok(enc('P1234567') !== enc('P1234567'), 'same value encrypts differently each time');
+$t = $rowA['id_number']; $t[20] = $t[20] === 'A' ? 'B' : 'A';
+ok(dec($t) === null, 'tampered ciphertext is rejected');
+ok(mask('P1234567') === '•••• 4567' && mask('12') === '••', 'masking shows last 4 only');
+ok(val('SELECT id FROM clients WHERE id_number_hash=?', [id_hash('p-123 4567')]) == $cA, 'exact ID search works through the hash');
+save_beneficiaries($cA, [['name' => 'Mother', 'relation' => 'Mother', 'country' => 'India', 'bank' => 'SBI', 'account' => '000123456789', 'phone' => '']]);
+$acc = val('SELECT account FROM beneficiaries WHERE client_id=?', [$cA]);
+ok(str_starts_with((string)$acc, 'enc:v1:') && dec($acc) === '000123456789', 'beneficiary account stored encrypted');
+ok(!str_contains((string)val('SELECT data FROM submissions LIMIT 1') ?? '', 'P1234567'), 'no plain ID in submissions table');
+
+// ---- 4. signed referral links ----
+ok(ref_valid('SA-1001', ref_sig('SA-1001')), 'agent link signature accepted');
+ok(!ref_valid('SA-1002', ref_sig('SA-1001')), 'changing the code in the link is rejected');
+ok(!ref_valid('SA-1001', ''), 'link without signature is not trusted');
+ok(str_contains(referral_link('SA-1001'), '&s=' . ref_sig('SA-1001')), 'share link carries the signature');
+
+// ---- 5. reset / activation links ----
+$link = make_reset_link((int)$agA['id'], (int)$admin['id'], 'activate');
+parse_str((string)parse_url($link, PHP_URL_QUERY), $qq);
+$row = one('SELECT * FROM password_resets WHERE token_hash=?', [hash('sha256', $qq['t'])]);
+ok($row && $row['purpose'] === 'activate' && strtotime($row['expires_at']) > time() + 71 * 3600, 'activation link stored hashed, 72-hour expiry');
+$first = q('UPDATE password_resets SET used_at=NOW() WHERE id=? AND used_at IS NULL', [$row['id']])->rowCount();
+$second = q('UPDATE password_resets SET used_at=NOW() WHERE id=? AND used_at IS NULL', [$row['id']])->rowCount();
+ok($first === 1 && $second === 0, 'a link can be used only once, even by two requests at the same time');
+make_reset_link((int)$agA['id'], (int)$admin['id']); $old = (int)val('SELECT COUNT(*) FROM password_resets WHERE user_id=? AND used_at IS NULL', [$agA['id']]);
+make_reset_link((int)$agA['id'], (int)$admin['id']);
+ok((int)val('SELECT COUNT(*) FROM password_resets WHERE user_id=? AND used_at IS NULL', [$agA['id']]) === 1 && $old === 1, 'a new link cancels the older one');
+$limited = false; try { for ($i = 0; $i < 6; $i++) make_reset_link((int)$agA['id'], (int)$admin['id']); } catch (RuntimeException $e) { $limited = true; }
+ok($limited, 'link creation is rate limited (5 per hour)');
+
+// ---- 6. two-step login ----
+ok(totp_code('GEZDGNBVGY3TQOJQGEZDGNBVGY3TQOJQ', 1) === '287082', 'TOTP matches RFC 6238 test vector');
+$sec = mfa_new_secret();
+q('UPDATE users SET mfa_secret=?, mfa_enabled=1, mfa_recovery=? WHERE id=?', [enc($sec), json_encode([password_hash('ABCDE12345', PASSWORD_DEFAULT)]), $admin['id']]);
+$adm = one('SELECT * FROM users WHERE id=?', [$admin['id']]);
+$code = totp_code($sec, intdiv(time(), 30));
+ok(mfa_check($adm, $code), 'current code accepted');
+ok(!mfa_check(one('SELECT * FROM users WHERE id=?', [$admin['id']]), $code), 'same code cannot be used twice');
+ok(!mfa_check(one('SELECT * FROM users WHERE id=?', [$admin['id']]), '000000') || $code === '000000', 'wrong code rejected');
+ok(mfa_check(one('SELECT * FROM users WHERE id=?', [$admin['id']]), 'abcde-12345'), 'recovery code works');
+ok(!mfa_check(one('SELECT * FROM users WHERE id=?', [$admin['id']]), 'ABCDE-12345'), 'recovery code works only once');
+ok(mfa_required($admin) && mfa_required($super) && mfa_required($comp) && !mfa_required($agA), 'two-step login required for super admin, admin and compliance');
+
+// ---- 7. tamper-evident activity log ----
+as_user($super);
+for ($i = 0; $i < 5; $i++) audit('test_event', 'test', $i, "row $i");
+[$n, $broken] = audit_verify();
+ok($n >= 5 && $broken === null, 'log chain verifies when untouched');
+$mid = (int)val("SELECT id FROM audit WHERE action='test_event' ORDER BY id LIMIT 1 OFFSET 2");
+q("UPDATE audit SET detail='edited' WHERE id=?", [$mid]);
+ok(audit_verify()[1] === $mid, 'editing a log row is detected at that row');
+q('DELETE FROM audit WHERE id=?', [$mid]);
+ok(audit_verify()[1] !== null, 'deleting a log row is detected');
+
+// ---- 8. commission ----
+q("INSERT INTO agent_commissions (agent_id, send_currency, receive_currency, per_unit) VALUES (?, 'CAD', 'INR', 0.25)", [$agA['id']]);
+$tid = (int)val("SELECT id FROM transfers WHERE ref_no='T1'");
+apply_commission($tid);
+$t1 = one('SELECT * FROM transfers WHERE id=?', [$tid]);
+ok((float)$t1['commission'] === 250.0 && $t1['commission_currency'] === 'INR', 'commission 0.25 INR per CAD on 1,000 CAD = 250 INR');
+q('UPDATE agent_commissions SET per_unit=0.5 WHERE agent_id=?', [$agA['id']]); apply_commission($tid);
+ok((float)val('SELECT commission FROM transfers WHERE id=?', [$tid]) === 250.0, 'commission stays fixed after the rate changes');
+
+// ---- 9. Telegram messages carry no client data ----
+$txt = rates_table_text(['CAD>INR' => ['send' => 'CAD', 'recv' => 'INR', 'market' => 61.2, 'buy' => 63.0, 'sell' => 64.9]]);
+ok(!preg_match('/Client|P1234567|0001234/', $txt), 'rate message holds rates only');
+
+$summary = sprintf("%s  %d passed, %d failed\n", date('Y-m-d H:i:s'), $pass, $fail);
+$report = $summary . implode("\n", $out) . "\n";
+echo $report;
+@file_put_contents(__DIR__ . '/../storage/test-report.txt', $report);
+// leave the test database empty
+foreach (db()->query('SHOW TABLES')->fetchAll(PDO::FETCH_COLUMN) as $t) db()->exec("TRUNCATE TABLE `$t`");
+exit($fail ? 1 : 0);

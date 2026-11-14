@@ -12,7 +12,7 @@ $labels = ['login' => 'Logged in', 'logout' => 'Logged out', 'login_failed' => '
   'rates_set' => 'Set daily rates', 'rates_proposed' => 'Daily rates sent to Telegram', 'rates_settings' => 'Changed rate settings', 'pair_add' => 'Added a currency pair', 'pair_toggle' => 'Switched a currency pair',
   'telegram_bot_set' => 'Connected the Telegram bot', 'telegram_linked' => 'Linked Telegram', 'telegram_unlinked' => 'Unlinked Telegram',
   'export_clients' => 'Exported clients', 'export_transfers' => 'Exported transfers', 'export_commission' => 'Exported commission', 'export_audit' => 'Exported activity history',
-  'view_id_file' => 'Opened an ID document', 'import' => 'Imported data', 'delete_activity' => 'Deleted a log entry', 'add_activity' => 'Added a daily log entry', 'reset_link' => 'Created a password reset link', 'reset_link_used' => 'Set a new password with a reset link', 'change_role' => 'Changed a job role', 'roles_changed' => 'Changed role permissions', 'market_backfill' => 'Added past market rates', 'export_rates' => 'Exported rate tracking', 'activity_done' => 'Closed a follow-up'];
+  'view_id_file' => 'Opened an ID document', 'import' => 'Imported data', 'delete_activity' => 'Deleted a log entry', 'add_activity' => 'Added a daily log entry', 'reset_link' => 'Created a password reset link', 'reset_link_used' => 'Set a new password with a reset link', 'change_role' => 'Changed a job role', 'roles_changed' => 'Changed role permissions', 'market_backfill' => 'Added past market rates', 'view_pii' => 'Looked at full ID or account numbers', 'audit_verified' => 'Checked the log is intact', 'mfa_enabled' => 'Turned on two-step login', 'mfa_disabled' => 'Turned off two-step login', 'mfa_failed' => 'Wrong two-step code', 'mfa_reset' => 'Reset someone\'s two-step login', 'mfa_new_codes' => 'Made new recovery codes', 'mfa_recovery_used' => 'Used a recovery code', 'account_activated' => 'Activated their account', 'export_rates' => 'Exported rate tracking', 'activity_done' => 'Closed a follow-up'];
 
 $who = $isAdmin ? get('user') : (string)$u['id'];
 $act = get('action'); $from = valid_date(get('from')) ?? ''; $to = valid_date(get('to')) ?? ''; $qs = get('q');
@@ -37,11 +37,20 @@ if ($isAdmin && get('export') === 'csv') {
     exit;
 }
 $rows = all($sql . ' LIMIT 500', $par);
+$check = null;
+if ($isAdmin && get('verify') === '1') { $check = audit_verify(); audit('audit_verified', 'audit', null, $check[1] ? 'BROKEN at row ' . $check[1] : 'intact, ' . $check[0] . ' rows'); }
 $counts = $isAdmin ? all("SELECT u.id, u.name, COUNT(a.id) n, MAX(a.created_at) last FROM users u LEFT JOIN audit a ON a.user_id=u.id AND a.created_at >= (NOW() - INTERVAL 30 DAY) GROUP BY u.id, u.name ORDER BY n DESC") : [];
 page_head($isAdmin ? 'Activity history' : 'My activity'); ?>
 <div class="spread"><div><h1><?= $isAdmin ? 'Activity history' : 'My activity' ?></h1>
   <div class="muted"><?= $isAdmin ? 'Every action in the portal and on Telegram, with who did it and when. Kept permanently.' : 'Everything you have done in the portal.' ?></div></div>
   <?php if ($isAdmin): ?><a class="btn sm" href="/?<?= e(http_build_query(array_merge($_GET, ['export' => 'csv']))) ?>">Export CSV</a><?php endif; ?></div>
+<?php if ($isAdmin): ?>
+<div class="card row" style="justify-content:space-between">
+  <span>Every row is chained to the one before it, so a row changed or removed in the database is detected.</span>
+  <a class="btn sm" href="/?p=audit&verify=1">Check the log is intact</a>
+  <?php if ($check): ?><div class="banner <?= $check[1] ? 'bad' : 'ok' ?>" style="flex-basis:100%;margin:0"><?= $check[1] ? 'Warning: the log was changed at row ' . (int)$check[1] . '. Rows from there on cannot be trusted.' : 'Intact: all ' . (int)$check[0] . ' chained rows match.' ?><?= $check[2] ? ' ' . (int)$check[2] . ' older rows were written before the check existed.' : '' ?></div><?php endif; ?>
+</div>
+<?php endif; ?>
 <?php if ($isAdmin && $counts): ?>
 <div class="tablewrap"><table><thead><tr><th>Person</th><th class="r">Actions in last 30 days</th><th>Last action</th><th></th></tr></thead><tbody>
 <?php foreach ($counts as $c): ?><tr><td><?= e($c['name']) ?></td><td class="r num"><?= (int)$c['n'] ?></td><td><?= fdatetime($c['last']) ?></td><td><a class="btn sm" href="/?p=audit&user=<?= (int)$c['id'] ?>">See their log</a></td></tr><?php endforeach; ?>

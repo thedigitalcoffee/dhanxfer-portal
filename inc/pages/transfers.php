@@ -8,7 +8,7 @@ $canDecide = can('transfers.decide');
 if ($_SERVER['REQUEST_METHOD'] === 'POST') {
     $t = one('SELECT * FROM transfers WHERE id=?', [(int)post('id')]);
     $act = post('act');
-    if (!$t || ($isAdmin ? !can('clients.all') : (int)$t['agent_id'] !== (int)$u['id'])) { flash('Transfer not found.', 'bad'); redirect('/?p=transfers'); }
+    if (!$t || !can_see_transfer($t)) { flash('Transfer not found.', 'bad'); redirect('/?p=transfers'); }
     $note = mb_substr(post('note'), 0, 250);
     $ok = false;
     if ($canDecide && $act === 'accept' && $t['status'] === 'pending') {
@@ -31,7 +31,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
 /* ----- single transfer ----- */
 if (get('id') !== '') {
     $t = one('SELECT t.*, a.name agent_name, a.ref_code, r.name req_name, d.name dec_name, c.client_no FROM transfers t LEFT JOIN users a ON a.id=t.agent_id LEFT JOIN users r ON r.id=t.requested_by LEFT JOIN users d ON d.id=t.decided_by LEFT JOIN clients c ON c.id=t.client_id WHERE t.id=?', [(int)get('id')]);
-    if (!$t || ($isAdmin ? !can('clients.all') : (int)$t['agent_id'] !== (int)$u['id'])) { flash('Transfer not found.', 'bad'); redirect('/?p=transfers'); }
+    if (!$t || !can_see_transfer($t)) { flash('Transfer not found.', 'bad'); redirect('/?p=transfers'); }
     audit('view_transfer', 'transfer', $t['id'], $t['ref_no']);
     page_head('Transfer ' . $t['ref_no']); ?>
     <div class="spread"><div><div class="tag num"><?= e($t['ref_no']) ?></div><h1><?= e($t['client_name']) ?></h1><div style="margin-top:6px"><?= tx_pill($t['status']) ?></div></div>
@@ -65,8 +65,8 @@ if (get('id') !== '') {
 /* ----- list ----- */
 $status = get('status'); $from = valid_date(get('from')) ?? ''; $to = valid_date(get('to')) ?? ''; $agent = get('agent'); $qs = get('q');
 $where = []; $par = [];
-if (!$isAdmin) { $where[] = 't.agent_id=?'; $par[] = $u['id']; }
-elseif (!can('clients.all')) $where[] = '1=0';
+[$scSql, $scPar] = scope_where($u, 't'); $where[] = $scSql; $par = array_merge($par, $scPar);
+if (!$isAdmin) {}
 elseif ($agent === 'none') $where[] = 't.agent_id IS NULL';
 elseif ($agent !== '') { $where[] = 't.agent_id=?'; $par[] = (int)$agent; }
 if (in_array($status, ['pending', 'accepted', 'completed', 'rejected', 'cancelled'], true)) { $where[] = 't.status=?'; $par[] = $status; }

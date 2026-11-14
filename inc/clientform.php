@@ -19,7 +19,9 @@ function read_client_post(): array {
             $name = is_string($name) ? trim($name) : '';
             if ($name === '') continue;
             $g = fn($k) => (isset($_POST[$k][$i]) && is_string($_POST[$k][$i])) ? mb_substr(trim($_POST[$k][$i]), 0, 120) : '';
-            $b[] = ['name' => mb_substr($name, 0, 160), 'relation' => $g('b_relation'), 'country' => $g('b_country'), 'bank' => $g('b_bank'), 'account' => $g('b_account'), 'phone' => $g('b_phone')];
+            $acct = $g('b_account');
+            if ($acct === '') { $keep = $_POST['b_account_keep'][$i] ?? ''; if (is_string($keep) && str_starts_with($keep, 'enc:v1:') && dec($keep) !== null) $acct = $keep; }
+            $b[] = ['name' => mb_substr($name, 0, 160), 'relation' => $g('b_relation'), 'country' => $g('b_country'), 'bank' => $g('b_bank'), 'account' => $acct, 'phone' => $g('b_phone')];
             if (count($b) >= 10) break;
         }
     }
@@ -30,7 +32,7 @@ function save_beneficiaries(int $clientId, array $list): void {
     q('DELETE FROM beneficiaries WHERE client_id=?', [$clientId]);
     foreach ($list as $b) {
         q('INSERT INTO beneficiaries (client_id,name,relation,country,bank,account,phone) VALUES (?,?,?,?,?,?,?)',
-            [$clientId, $b['name'], $b['relation'], $b['country'], $b['bank'], $b['account'], $b['phone']]);
+            [$clientId, $b['name'], $b['relation'], $b['country'], $b['bank'], enc($b['account'] ?: null), $b['phone']]);
     }
 }
 
@@ -38,9 +40,9 @@ function nz($v) { return ($v === '' || $v === null) ? null : $v; }
 
 /** Insert a client row. $extra may hold kyc, risk, agent_id, source, consent, id_file, created_by. */
 function insert_client(array $v, array $extra): int {
-    $cols = array_merge(CLIENT_FIELDS, ['client_no', 'kyc', 'risk', 'agent_id', 'source', 'consent', 'id_file', 'created_by']);
+    $cols = array_merge(CLIENT_FIELDS, ['client_no', 'kyc', 'risk', 'agent_id', 'source', 'consent', 'id_file', 'created_by', 'id_number_hash']);
     $vals = [];
-    foreach (CLIENT_FIELDS as $k) $vals[] = nz($v[$k] ?? '');
+    foreach (CLIENT_FIELDS as $k) $vals[] = $k === 'id_number' ? enc(nz($v[$k] ?? '')) : nz($v[$k] ?? '');
     $vals[] = new_client_no();
     $vals[] = $extra['kyc'] ?? 'Pending';
     $vals[] = $extra['risk'] ?? 'Low';
@@ -49,6 +51,7 @@ function insert_client(array $v, array $extra): int {
     $vals[] = !empty($extra['consent']) ? 1 : 0;
     $vals[] = $extra['id_file'] ?? null;
     $vals[] = $extra['created_by'] ?? null;
+    $vals[] = id_hash($v['id_number'] ?? '');
     q('INSERT INTO clients (' . implode(',', $cols) . ') VALUES (' . implode(',', array_fill(0, count($cols), '?')) . ')', $vals);
     return (int)db()->lastInsertId();
 }
@@ -91,7 +94,7 @@ function client_fields(array $v, array $benefs, string $mode, array $agents = []
       <?php if ($mode === 'public'): ?><p class="tag" style="margin-top:0">Required by law for money transfers. We check your original ID before your first transfer.</p><?php endif; ?>
       <div class="fields">
         <div class="f"><label for="id_type">ID type</label><select id="id_type" name="id_type"><?= opts(ID_TYPES, $sel('id_type')) ?></select></div>
-        <div class="f"><label for="id_number">ID number</label><input id="id_number" name="id_number" value="<?= $g('id_number') ?>" autocomplete="off"></div>
+        <div class="f"><label for="id_number">ID number<?= !empty($v['id_masked']) ? ' · on file: ' . e($v['id_masked']) . ' (leave empty to keep)' : '' ?></label><input id="id_number" name="id_number" value="<?= $g('id_number') ?>" autocomplete="off"></div>
         <div class="f"><label for="id_country">ID issuing country</label><input id="id_country" name="id_country" list="countries" value="<?= $g('id_country') ?>"></div>
         <div class="f"><label for="id_expiry">ID expiry date</label><input id="id_expiry" name="id_expiry" type="date" value="<?= $g('id_expiry') ?>"></div>
         <div class="f wide"><label for="id_file">Photo or scan of the ID (optional, JPG/PNG/PDF, max 6 MB)<?= !empty($v['id_file']) ? ' · a file is already on record; uploading replaces it' : '' ?></label><input id="id_file" name="id_file" type="file" accept="image/*,application/pdf"></div>
@@ -127,7 +130,7 @@ function client_fields(array $v, array $benefs, string $mode, array $agents = []
           <div class="f"><label>Relationship</label><input name="b_relation[]" value="<?= $bv('relation') ?>" placeholder="Mother, brother…"></div>
           <div class="f"><label>Country</label><input name="b_country[]" list="countries" value="<?= $bv('country') ?>"></div>
           <div class="f"><label>Bank name</label><input name="b_bank[]" value="<?= $bv('bank') ?>"></div>
-          <div class="f"><label>Account / IBAN</label><input name="b_account[]" value="<?= $bv('account') ?>" autocomplete="off"></div>
+          <div class="f"><label>Account / IBAN<?= !empty($b['account_masked']) ? ' · on file ' . e($b['account_masked']) : '' ?></label><input name="b_account[]" value="<?= $bv('account') ?>" autocomplete="off" placeholder="<?= !empty($b['account_masked']) ? 'Leave empty to keep' : '' ?>"><input type="hidden" name="b_account_keep[]" value="<?= e($b['account_keep'] ?? '') ?>"></div>
           <div class="f"><label>Phone</label><input name="b_phone[]" value="<?= $bv('phone') ?>"></div>
         </div>
       <?php endforeach; ?>
@@ -149,7 +152,8 @@ function client_fields(array $v, array $benefs, string $mode, array $agents = []
  * Without JavaScript every step shows at once and the form still works.
  */
 function client_wizard(array $v, array $benefs, string $mode): void {
-    $pub = $mode === 'public';
+    $locked = $mode === 'public_locked';
+    $pub = $mode === 'public' || $locked;
     $g = fn($k) => e($v[$k] ?? '');
     $sel = fn($k) => $v[$k] ?? '';
     $you = $pub ? 'your' : "the client's";
@@ -212,7 +216,8 @@ function client_wizard(array $v, array $benefs, string $mode): void {
         <div class="f"><label for="destination">Usual destination country</label><input id="destination" name="destination" list="countries" value="<?= $g('destination') ?>"></div>
         <div class="f"><label for="referral">How did <?= $pub ? 'you' : 'they' ?> hear about us?</label><select id="referral" name="referral"><?= opts(HEARD, $sel('referral')) ?></select></div>
         <div class="f"><label for="referred_by">Referred by (name)</label><input id="referred_by" name="referred_by" value="<?= $g('referred_by') ?>"></div>
-        <?php if ($pub): ?><div class="f"><label for="ref_code">Sub-agent referral ID</label><input id="ref_code" name="ref_code" placeholder="e.g. SA-1023" value="<?= $g('ref_code') ?>" style="text-transform:uppercase" <?= $g('ref_code') !== '' ? 'readonly' : '' ?>></div><?php endif; ?>
+        <?php if ($locked): ?><div class="f"><span class="lbl">DhanXfer agent</span><div class="secret" style="font-size:15px;padding:9px 10px"><?= $g('ref_code') ?></div></div>
+        <?php elseif ($pub): ?><div class="f"><label for="ref_code">Agent code, if an agent helped you</label><input id="ref_code" name="ref_code" placeholder="e.g. SA-1023" value="<?= $g('ref_code') ?>" style="text-transform:uppercase"></div><?php endif; ?>
       </div>
     </section>
 

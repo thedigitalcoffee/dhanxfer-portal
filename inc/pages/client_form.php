@@ -11,6 +11,19 @@ if ($id) {
 $agents = $isAdmin ? all("SELECT id,name,ref_code FROM users WHERE role='agent' AND active=1 ORDER BY name") : [];
 $v = $c ?? ['kyc' => 'Pending', 'risk' => 'Low'];
 $benefs = $c ? all('SELECT * FROM beneficiaries WHERE client_id=?', [$c['id']]) : [];
+$reveal = can('pii.reveal');
+if ($c) {
+    $plainId = dec($c['id_number']);
+    $v['id_number'] = $reveal ? $plainId : '';
+    $v['id_masked'] = $reveal ? '' : mask($plainId);
+    foreach ($benefs as &$bb) {
+        $pa = dec($bb['account']);
+        $bb['account_keep'] = $reveal ? '' : (string)$bb['account'];
+        $bb['account_masked'] = $reveal ? '' : mask($pa);
+        $bb['account'] = $reveal ? $pa : '';
+    }
+    unset($bb);
+}
 $errors = [];
 $dupe = null;
 
@@ -32,7 +45,14 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
     if (!$errors) {
         if ($c) {
             $sets = []; $par = [];
-            foreach (CLIENT_FIELDS as $k) { $sets[] = "$k=?"; $par[] = nz($nv[$k]); }
+            foreach (CLIENT_FIELDS as $k) {
+                if ($k === 'id_number') {
+                    if ($nv['id_number'] === '' && !$reveal) continue; // keep the number on file
+                    $sets[] = 'id_number=?'; $par[] = enc(nz($nv['id_number'])); $sets[] = 'id_number_hash=?'; $par[] = id_hash($nv['id_number']);
+                    continue;
+                }
+                $sets[] = "$k=?"; $par[] = nz($nv[$k]);
+            }
             $sets[] = 'kyc=?'; $par[] = $kyc; $sets[] = 'risk=?'; $par[] = $risk;
             $sets[] = 'agent_id=?'; $par[] = $agentId; $sets[] = 'consent=?'; $par[] = $consent ? 1 : 0;
             if ($file) { $sets[] = 'id_file=?'; $par[] = $file; }
@@ -46,7 +66,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
         } else {
             $newId = insert_client($nv, ['kyc' => $kyc, 'risk' => $risk, 'agent_id' => $agentId, 'source' => $isAdmin ? 'admin' : 'agent', 'consent' => $consent, 'id_file' => $file, 'created_by' => $u['id']]);
             save_beneficiaries($newId, $benefs);
-            audit('create_client', 'client', $newId, $nv['name']);
+            audit('create_client', 'client', $newId, (string)val('SELECT client_no FROM clients WHERE id=?', [$newId]));
             flash('Client saved as ' . val('SELECT client_no FROM clients WHERE id=?', [$newId]) . '.');
             redirect('/?p=client&id=' . $newId);
         }

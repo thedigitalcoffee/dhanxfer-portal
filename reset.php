@@ -19,17 +19,18 @@ if ($valid && $_SERVER['REQUEST_METHOD'] === 'POST') {
         $done = q('UPDATE password_resets SET used_at=NOW() WHERE id=? AND used_at IS NULL', [$row['id']])->rowCount();
         if ($done) {
             q('UPDATE users SET password_hash=?, must_change_password=0, session_version=session_version+1 WHERE id=?', [password_hash($p1, PASSWORD_DEFAULT), $row['user_id']]);
-            q('INSERT INTO audit (user_id, action, entity, entity_id, detail, ip) VALUES (?,?,?,?,?,?)', [$row['user_id'], 'reset_link_used', 'user', $row['user_id'], 'Password set with reset link', client_ip()]);
-            flash('Your new password is saved. Log in with it now.');
+            audit_write((int)$row['user_id'], $row['purpose'] === 'activate' ? 'account_activated' : 'reset_link_used', 'user', $row['user_id'], $row['purpose'] === 'activate' ? 'Account activated' : 'Password set with reset link', client_ip());
+            flash($row['purpose'] === 'activate' ? 'Your account is active. Log in with your login ID and new password.' : 'Your new password is saved. Log in with it now.');
             redirect('/login.php');
         }
         $valid = false;
     }
 }
-page_head('Set a new password');
+$activate = $row && $row['purpose'] === 'activate';
+page_head($activate ? 'Activate your account' : 'Set a new password');
 ?>
 <div class="login card">
-  <h1 style="margin-bottom:6px">Set a new password</h1>
+  <h1 style="margin-bottom:6px"><?= $activate ? 'Activate your account' : 'Set a new password' ?></h1>
   <?php if (!$valid): ?>
     <div class="banner bad">This link has already been used or has expired. Ask a DhanXfer admin to send you a new one.</div>
     <a class="btn" href="/login.php">Go to log in</a>

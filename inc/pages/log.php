@@ -12,7 +12,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
         $follow = valid_date(post('follow_up'));
         q('INSERT INTO activities (act_date,type,client_id,client_name,office,status,follow_up,notes,user_id) VALUES (?,?,?,?,?,?,?,?,?)',
             [$date, $type, $cid, $cname, in_array(post('office'), OFFICES, true) ? post('office') : null, $follow ? 'Open' : 'Done', $follow, mb_substr(post('notes'), 0, 2000) ?: null, $u['id']]);
-        audit('add_activity', 'activity', (int)db()->lastInsertId(), $type . ($cname ? ' · ' . $cname : ''));
+        audit('add_activity', 'activity', (int)db()->lastInsertId(), $type);
         flash('Entry saved.');
         redirect('/?p=log&d=' . $date);
     }

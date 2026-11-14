@@ -183,8 +183,7 @@ function activate_rates(array $rates, string $source, ?int $userId): void {
 
 /** Like audit(), but for a known user id (Telegram and cron have no web session). */
 function audit_as(?int $userId, string $action, string $entity = '', $entityId = null, string $detail = ''): void {
-    q('INSERT INTO audit (user_id, action, entity, entity_id, detail, ip) VALUES (?,?,?,?,?,?)',
-        [$userId, $action, $entity, $entityId, mb_substr($detail, 0, 500), PHP_SAPI === 'cli' ? 'cron' : client_ip()]);
+    audit_write($userId, $action, $entity, $entityId, $detail, PHP_SAPI === 'cli' ? 'cron' : client_ip());
 }
 
 /* ================= Commission ================= */

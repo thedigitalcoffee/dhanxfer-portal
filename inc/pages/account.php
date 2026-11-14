@@ -28,5 +28,6 @@ page_head('My account'); ?>
     <div class="f" style="margin-bottom:16px"><label for="password2">Type the new password again</label><input id="password2" name="password2" type="password" required autocomplete="new-password"></div>
     <button class="btn gold" style="width:100%">Change password</button>
   </form>
+  <p class="tag" style="margin-bottom:0">Two-step login: <strong><?= $u['mfa_enabled'] ? 'on' : 'off' ?></strong> · <a href="/?p=mfa"><?= $u['mfa_enabled'] ? 'Manage' : 'Set it up' ?></a></p>
 </div>
 <?php page_foot();

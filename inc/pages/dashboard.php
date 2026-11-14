@@ -14,7 +14,7 @@ function rates_strip(array $live): void {
 
 if ($u['role'] === 'agent') {
     $aid = (int)$u['id'];
-    $link = rtrim($CONFIG['app_url'], '/') . '/register?ref=' . urlencode($u['ref_code']);
+    $link = referral_link((string)$u['ref_code']);
     $nClients = (int)val('SELECT COUNT(*) FROM clients WHERE agent_id=?', [$aid]);
     $nPending = (int)val("SELECT COUNT(*) FROM transfers WHERE agent_id=? AND status='pending'", [$aid]);
     $month = all("SELECT send_currency, SUM(send_amount) s, COUNT(*) n FROM transfers WHERE agent_id=? AND status IN ('accepted','completed') AND transfer_date >= DATE_FORMAT(CURDATE(),'%Y-%m-01') GROUP BY send_currency", [$aid]);

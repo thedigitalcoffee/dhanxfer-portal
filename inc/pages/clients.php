@@ -3,11 +3,11 @@ defined('DX') or exit;
 $isAdmin = is_staff();
 $qs = get('q'); $kyc = get('kyc'); $office = get('office'); $agent = get('agent');
 $where = []; $par = [];
-if (!$isAdmin) { $where[] = 'c.agent_id=?'; $par[] = $u['id']; }
-elseif (!can('clients.all')) { $where[] = '1=0'; }
+[$scSql, $scPar] = scope_where($u, 'c'); $where[] = $scSql; $par = array_merge($par, $scPar);
+if (!$isAdmin) {}
 elseif ($agent === 'none') { $where[] = 'c.agent_id IS NULL'; }
 elseif ($agent !== '') { $where[] = 'c.agent_id=?'; $par[] = (int)$agent; }
-if ($qs !== '') { $where[] = '(c.name LIKE ? OR c.phone LIKE ? OR c.client_no LIKE ? OR c.email LIKE ? OR c.id_number LIKE ?)'; $like = '%' . $qs . '%'; array_push($par, $like, $like, $like, $like, $like); }
+if ($qs !== '') { $where[] = '(c.name LIKE ? OR c.phone LIKE ? OR c.client_no LIKE ? OR c.email LIKE ? OR c.id_number_hash = ?)'; $like = '%' . $qs . '%'; array_push($par, $like, $like, $like, $like, (string)id_hash($qs)); }
 if (in_array($kyc, KYC, true)) { $where[] = 'c.kyc=?'; $par[] = $kyc; }
 if (in_array($office, OFFICES, true)) { $where[] = 'c.office=?'; $par[] = $office; }
 $sql = "SELECT c.*, a.name agent_name, a.ref_code,
@@ -22,7 +22,7 @@ if (get('export') === 'csv' && can('export')) {
     header('Content-Disposition: attachment; filename="dhanxfer-clients-' . today() . '.csv"');
     $out = fopen('php://output', 'w');
     fputcsv($out, ['Client no.', 'Name', 'Phone', 'WhatsApp', 'Email', 'Office', 'DOB', 'Nationality', 'Occupation', 'Employer', 'Address', 'City', 'Province/Emirate', 'Postal', 'Country', 'ID type', 'ID number', 'ID country', 'ID expiry', 'KYC', 'Risk', 'Purpose', 'Source of funds', 'Monthly volume', 'Destination', 'Heard via', 'Referred by', 'Referral sub-agent', 'Registered via', 'Consent', 'Notes', 'Registered']);
-    foreach ($rows as $c) fputcsv($out, [$c['client_no'], $c['name'], $c['phone'], $c['whatsapp'], $c['email'], $c['office'], $c['dob'], $c['nationality'], $c['occupation'], $c['employer'], $c['address'], $c['city'], $c['province'], $c['postal'], $c['country'], $c['id_type'], $c['id_number'], $c['id_country'], $c['id_expiry'], $c['kyc'], $c['risk'], $c['purpose'], $c['source_of_funds'], $c['monthly_volume'], $c['destination'], $c['referral'], $c['referred_by'], $c['ref_code'], $c['source'], $c['consent'] ? 'Yes' : 'No', $c['notes'], $c['created_at']]);
+    foreach ($rows as $c) fputcsv($out, [$c['client_no'], $c['name'], $c['phone'], $c['whatsapp'], $c['email'], $c['office'], $c['dob'], $c['nationality'], $c['occupation'], $c['employer'], $c['address'], $c['city'], $c['province'], $c['postal'], $c['country'], $c['id_type'], can('pii.reveal') ? dec($c['id_number']) : mask(dec($c['id_number'])), $c['id_country'], $c['id_expiry'], $c['kyc'], $c['risk'], $c['purpose'], $c['source_of_funds'], $c['monthly_volume'], $c['destination'], $c['referral'], $c['referred_by'], $c['ref_code'], $c['source'], $c['consent'] ? 'Yes' : 'No', $c['notes'], $c['created_at']]);
     audit('export_clients', 'client', null, count($rows) . ' rows');
     exit;
 }

@@ -18,6 +18,14 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
     } else {
         $u = one('SELECT * FROM users WHERE username=?', [$username]);
         if ($u && $u['active'] && is_string($password) && password_verify($password, $u['password_hash'])) {
+            q('DELETE FROM login_attempts WHERE username=?', [$username]);
+            if ($u['mfa_enabled']) {
+                // Password is right, but no session is given until the second step is done.
+                session_regenerate_id(true);
+                unset($_SESSION['uid'], $_SESSION['sv']);
+                $_SESSION['mfa_uid'] = (int)$u['id']; $_SESSION['mfa_at'] = time(); $_SESSION['mfa_next'] = $next;
+                redirect('/mfa.php');
+            }
             session_regenerate_id(true);
             $_SESSION['uid'] = (int)$u['id'];
             $_SESSION['sv'] = (int)$u['session_version'];
@@ -28,7 +36,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
             redirect($u['must_change_password'] ? '/?p=account&first=1' : $next);
         }
         q('INSERT INTO login_attempts (ip, username) VALUES (?,?)', [$ip, $username]);
-        q('INSERT INTO audit (user_id, action, entity, detail, ip) VALUES (?,?,?,?,?)', [$u['id'] ?? null, 'login_failed', 'user', 'Login ID tried: ' . mb_substr($username, 0, 60), $ip]);
+        audit_write(isset($u['id']) ? (int)$u['id'] : null, 'login_failed', 'user', null, 'Login ID tried: ' . mb_substr($username, 0, 60), $ip);
         $error = ($u && !$u['active']) ? 'This account is switched off. Contact a DhanXfer admin.' : 'Wrong ID or password.';
     }
 }
