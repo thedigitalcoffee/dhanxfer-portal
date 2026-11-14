@@ -35,7 +35,11 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
         q("UPDATE transfers SET status='rejected', decision_note=? WHERE id=? AND status='accepted'", [$note ?: 'Beneficiary changed after acceptance', $t['id']]); $ok = 'Transfer ' . $t['ref_no'] . ' rejected.';
     } elseif ($canDecide && $act === 'complete' && $t['status'] === 'accepted') {
         $receipt = mb_substr(post('receipt_no'), 0, 60);
-        q("UPDATE transfers SET status='completed', receipt_no=COALESCE(?, receipt_no) WHERE id=?", [$receipt ?: null, $t['id']]); $ok = 'Transfer ' . $t['ref_no'] . ' marked completed.';
+        $bid = (int)($t['beneficiary_id'] ?: post('beneficiary_id'));
+        // transfers accepted before beneficiaries were reviewed are linked to an approved beneficiary before payout
+        if (!$t['beneficiary_id'] && !benef_usable($bid ? one('SELECT * FROM beneficiaries WHERE id=?', [$bid]) : null, (int)$t['client_id'])[0]) { flash('Cannot complete: choose the approved beneficiary this transfer is paid to.', 'bad'); redirect('/?p=transfers&id=' . $t['id']); }
+        if (q("UPDATE transfers SET status='completed', receipt_no=COALESCE(?, receipt_no), beneficiary_id=? WHERE id=? AND status='accepted'", [$receipt ?: null, $bid, $t['id']])->rowCount())
+            $ok = 'Transfer ' . $t['ref_no'] . ' marked completed.';
     } elseif ($act === 'cancel' && $t['status'] === 'pending' && ($canDecide || (int)$t['requested_by'] === (int)$u['id'])) {
         q("UPDATE transfers SET status='cancelled' WHERE id=?", [$t['id']]); $ok = 'Transfer request cancelled.';
     }
@@ -73,6 +77,9 @@ if (get('id') !== '') {
       <?php elseif ($canDecide && $t['status'] === 'accepted'): ?>
         <form method="post" class="card"><?= csrf_field() ?><input type="hidden" name="id" value="<?= (int)$t['id'] ?>">
           <h3 style="margin-bottom:10px">Mark as completed</h3>
+          <?php if (!$t['beneficiary_id'] && $t['client_id']): $opts = all("SELECT id, name, bank, account FROM beneficiaries WHERE client_id=? AND status='active' ORDER BY name", [$t['client_id']]); ?>
+          <div class="f" style="margin-bottom:12px"><label for="beneficiary_id">Paid to (approved beneficiary) <span class="req">*</span></label><select id="beneficiary_id" name="beneficiary_id"><option value="">Choose…</option><?php foreach ($opts as $o): ?><option value="<?= (int)$o['id'] ?>"><?= e($o['name'] . ($o['bank'] ? ' · ' . $o['bank'] : '') . ($o['account'] ? ' · ' . mask(dec($o['account'])) : '')) ?></option><?php endforeach; ?></select><div class="tag">Accepted before beneficiaries were reviewed. Written on the request: <?= e($t['beneficiary']) ?></div></div>
+          <?php endif; ?>
           <?php if ($t['beneficiary_id'] && !($bu = benef_usable_tx($t))[0]): ?><div class="banner bad">Do not pay out. Beneficiary: <?= e($bu[1]) ?></div><button class="btn danger" name="act" value="reject" data-confirm="Reject this accepted transfer?">Reject transfer</button><?php endif; ?>
           <div class="f" style="margin-bottom:12px"><label for="receipt_no">Receipt / payout reference</label><input id="receipt_no" name="receipt_no" value="<?= e($t['receipt_no']) ?>"></div>
           <button class="btn gold" name="act" value="complete">Mark completed</button></form>

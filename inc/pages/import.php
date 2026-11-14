@@ -31,6 +31,10 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
     if (empty($_FILES['csv']) || $_FILES['csv']['error'] !== UPLOAD_ERR_OK) { flash('Choose a CSV file to import.', 'bad'); redirect('/?p=import'); }
     $rows = csv_rows($_FILES['csv']['tmp_name']);
     $added = 0; $skipped = [];
+    // one KYC identity per sender: hold the ID-number lock until the import is committed, so a save made at the
+    // same moment cannot reuse an ID number that this import has written but not yet committed
+    require_once __DIR__ . '/../kyc.php';
+    if ((int)val('SELECT GET_LOCK(?, 30)', [lock_name('dx_idnum')]) !== 1) { flash('Another identity is being saved. Try the import again in a minute.', 'bad'); redirect('/?p=import'); }
     db()->beginTransaction();
     try {
         if ($kind === 'clients') {
@@ -86,11 +90,11 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                 $added++;
             }
         }
-        db()->commit();
+        db()->commit(); val('SELECT RELEASE_LOCK(?)', [lock_name('dx_idnum')]);
         audit('import', $kind, null, "$added added, " . count($skipped) . ' skipped');
         $report = [$added, $skipped];
     } catch (Throwable $ex) {
-        db()->rollBack();
+        db()->rollBack(); val('SELECT RELEASE_LOCK(?)', [lock_name('dx_idnum')]);
         flash('The import stopped and nothing was saved: ' . $ex->getMessage(), 'bad');
         redirect('/?p=import');
     }

@@ -50,7 +50,7 @@ if ($r && $_SERVER['REQUEST_METHOD'] === 'POST') {
                 unset($_SESSION['upload_ok'][$r['id']]);
                 $done = true;
             } catch (IdNumberTaken $ex) {
-                q('UPDATE upload_requests SET used_at=NULL WHERE id=?', [$r['id']]);
+                q('UPDATE upload_requests SET used_at=NULL WHERE id=?', [$r['id']]); @unlink(ids_dir() . '/' . basename($file));
                 audit_write(null, 'document_refused', 'client', $r['client_id'], 'ID number already on another client record', client_ip());
                 $err[] = 'We could not accept this ID number online. Please contact DhanXfer on WhatsApp +1 (942)-6600-0600.';
             } else $err[] = 'This link was already used.';
