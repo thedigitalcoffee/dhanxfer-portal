@@ -3,13 +3,24 @@
 // Run on the server:  php tests/run.php
 if (PHP_SAPI !== 'cli') { http_response_code(404); exit; }
 define('DX_TEST', true);
+define('DX_NO_AUTO_MIGRATE', true); // the safety check below must look at the database before anything is created
 $_SERVER['REMOTE_ADDR'] = '127.0.0.1';
 require __DIR__ . '/../inc/bootstrap.php';
 require __DIR__ . '/../inc/clientform.php';
 require __DIR__ . '/../inc/rates.php';
 require __DIR__ . '/../inc/mfa.php';
 
-$pass = 0; $fail = 0; $out = [];
+$pass = 0; $fail = 0; $out = []; $finished = false;
+// If anything crashes, still write what ran, plus the error, to the report.
+register_shutdown_function(function () {
+    global $pass, $fail, $out, $finished;
+    if ($finished) return;
+    $err = error_get_last();
+    $report = date('Y-m-d H:i:s') . sprintf("  STOPPED EARLY  %d passed, %d failed\n", $pass, $fail) . implode("\n", $out) . "\nCRASH: " . ($err ? $err['message'] . ' at ' . basename($err['file']) . ':' . $err['line'] : 'unknown') . "\n";
+    echo $report;
+    @file_put_contents(__DIR__ . '/../storage/test-report.txt', $report);
+});
+set_exception_handler(function (Throwable $e) { global $out; $out[] = 'CRASH  ' . get_class($e) . ': ' . $e->getMessage() . ' at ' . basename($e->getFile()) . ':' . $e->getLine(); });
 function ok(bool $cond, string $name) { global $pass, $fail, $out; $cond ? $pass++ : $fail++; $out[] = ($cond ? 'ok     ' : 'FAILED ') . $name; }
 function as_user(?array $u) { $_SESSION['uid'] = $u['id'] ?? 0; $_SESSION['sv'] = $u['session_version'] ?? 0; }
 function mkuser(string $role, string $name, ?string $ref = null): array {
@@ -25,9 +36,11 @@ function mkuser(string $role, string $name, ?string $ref = null): array {
     if (is_file($liveCfg)) { $live = (function ($f) { return require $f; })($liveCfg); if (($live['db_name'] ?? '') === $CONFIG['db_name']) { echo "REFUSED: test database is the same as the live one.\n"; exit(2); } }
     if (($CONFIG['environment'] ?? '') === 'live') { echo "REFUSED: environment is live.\n"; exit(2); }
     $tables = db()->query('SHOW TABLES')->fetchAll(PDO::FETCH_COLUMN);
-    if ($tables) {
-        $marker = in_array('settings', $tables, true) ? db()->query("SELECT v FROM settings WHERE k='db_role'")->fetchColumn() : false;
-        if ($marker !== 'test') { echo "REFUSED: this database is not empty and is not marked as a test database.\n"; exit(2); }
+    $marker = in_array('settings', $tables, true) ? db()->query("SELECT v FROM settings WHERE k='db_role'")->fetchColumn() : false;
+    if ($tables && $marker !== 'test') {
+        // Allowed only when no table holds any row (for example tables created but never used).
+        foreach ($tables as $t) if ((int)db()->query("SELECT COUNT(*) FROM `$t`")->fetchColumn() > 0 && !in_array($t, ['settings', 'rate_pairs', 'role_permissions'], true)) { echo "REFUSED: database holds data in $t and is not marked as a test database.\n"; exit(2); }
+        if (in_array('settings', $tables, true) && (int)db()->query("SELECT COUNT(*) FROM settings WHERE k NOT IN ('schema_version','buy_pct','sell_pct','send_time','rates_on')")->fetchColumn() > 0) { echo "REFUSED: settings table has real settings.\n"; exit(2); }
     }
     $CONFIG['ids_dir'] = sys_get_temp_dir() . '/dx-test-ids-' . getmypid();
 })();
@@ -201,4 +214,5 @@ echo $report;
 @file_put_contents(__DIR__ . '/../storage/test-report.txt', $report);
 // leave the test database empty
 wipe_db();
+$finished = true;
 exit($fail ? 1 : 0);
