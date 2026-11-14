@@ -5,14 +5,15 @@ require __DIR__ . '/inc/layout.php';
 if (me()) redirect('/');
 $error = '';
 $next = get('next', '/');
-if (!str_starts_with($next, '/') || str_starts_with($next, '//')) $next = '/';
+// Only same-site paths: blocks //evil.com and /\evil.com (browsers read both as another site)
+if (!preg_match('#^/(?![/\\\\])[^\\s]*$#', $next)) $next = '/';
 
 if ($_SERVER['REQUEST_METHOD'] === 'POST') {
     csrf_check();
     $username = mb_strtolower(post('username'));
     $password = $_POST['password'] ?? '';
     $ip = client_ip();
-    $fails = (int)val('SELECT COUNT(*) FROM login_attempts WHERE (ip=? OR username=?) AND at > (NOW() - INTERVAL 15 MINUTE)', [$ip, $username]);
+    $fails = (int)val("SELECT COUNT(*) FROM login_attempts WHERE (ip=? OR username=?) AND username NOT LIKE 'mfa:%' AND username<>'status-check' AND at > (NOW() - INTERVAL 15 MINUTE)", [$ip, $username]);
     if ($fails >= 6) {
         $error = 'Too many wrong attempts. Wait 15 minutes and try again, or ask an admin to reset your password.';
     } else {
