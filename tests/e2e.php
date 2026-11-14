@@ -45,6 +45,17 @@ class Browser {
 }
 function fresh_step_wait(): void { usleep((30 - time() % 30) * 1000000 + 200000); } // next code window, so codes are not reused
 
+// keep the database connection alive through the waits for a fresh code window
+q('SET SESSION wait_timeout=900, interactive_timeout=900');
+function e2e_cleanup(): void {
+    q("DELETE FROM submissions WHERE phone IN ('+1 416 555 7009','+1 416 555 7010')");
+    q("DELETE FROM transfers WHERE ref_no='E2E-T2'"); q("DELETE FROM clients WHERE name IN ('E2E Client One','E2E Client Two')");
+    q("DELETE FROM users WHERE username='e2e.legacy'");
+    q("UPDATE users SET role='admin' WHERE username='test.admin'"); q("DELETE FROM settings WHERE k='owner_claim'");
+}
+e2e_cleanup(); // leftovers from an interrupted run
+register_shutdown_function(function () { try { e2e_cleanup(); } catch (Throwable $e) {} });
+
 // ---- test data: one client for each agent ----
 $a1 = one('SELECT * FROM users WHERE username=?', ['test.agent1']); $a2 = one('SELECT * FROM users WHERE username=?', ['test.agent2']);
 $c1 = insert_client(array_merge(array_fill_keys(CLIENT_FIELDS, ''), ['name' => 'E2E Client One', 'phone' => '+1 416 555 7001', 'office' => 'Canada', 'id_number' => 'E2E11111']), ['agent_id' => $a1['id'], 'source' => 'agent']);
@@ -148,8 +159,4 @@ $pt = new Browser(); $pt->req('/register?ref=SA-9002&s=0000000000000000'); $pt->
 $sub2 = one("SELECT * FROM submissions WHERE phone='+1 416 555 7010'");
 ok($sub2 && (int)$sub2['ref_verified'] === 0 && $sub2['agent_id'] === null, 'a tampered or typed code is kept but never credited automatically');
 
-// ---- clean up the extra rows this run created ----
-q("DELETE FROM submissions WHERE phone IN ('+1 416 555 7009','+1 416 555 7010')");
-q('DELETE FROM transfers WHERE id=?', [$t2]); q('DELETE FROM clients WHERE id IN (?,?)', [$c1, $c2]); q('DELETE FROM users WHERE id=?', [$lg]);
-q("UPDATE users SET role='admin' WHERE username='test.admin'"); q("DELETE FROM settings WHERE k='owner_claim'");
 exit($fail ? 1 : 0);
