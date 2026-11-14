@@ -25,7 +25,8 @@ if ($valid && $_SERVER['REQUEST_METHOD'] === 'POST') {
                 // The person just proved they hold the admin's link: let them set up two-step login now.
                 session_regenerate_id(true);
                 unset($_SESSION['uid'], $_SESSION['sv']);
-                $_SESSION['enroll_uid'] = (int)$usr['id']; $_SESSION['enroll_at'] = time(); $_SESSION['enroll_token'] = 1;
+                unset($_SESSION['enroll_setup'], $_SESSION['claim_super']);
+                $_SESSION['enroll_uid'] = (int)$usr['id']; $_SESSION['enroll_at'] = time(); $_SESSION['enroll_token'] = (int)$usr['id'];
                 redirect('/mfa_setup.php');
             }
             flash($row['purpose'] === 'activate' ? 'Your account is active. Log in with your login ID and new password.' : 'Your new password is saved. Log in with it now.');

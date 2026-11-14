@@ -12,7 +12,7 @@ if ($c) $allowed = $mayViewIds && can_see_client($c);
 if (!$allowed && $mayViewIds && val('SELECT 1 FROM submissions WHERE id_file=?', [$name])) $allowed = true;
 if (!$allowed) { http_response_code(403); exit('You do not have access to this file.'); }
 
-$path = __DIR__ . '/storage/ids/' . $name;
+$path = ids_dir() . '/' . $name;
 if (!is_file($path)) { http_response_code(404); exit('Not found'); }
 $types = ['jpg' => 'image/jpeg', 'png' => 'image/png', 'webp' => 'image/webp', 'pdf' => 'application/pdf', 'heic' => 'image/heic'];
 $ext = pathinfo($name, PATHINFO_EXTENSION);

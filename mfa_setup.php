@@ -7,10 +7,11 @@ require __DIR__ . '/inc/mfa.php';
 strict_csp();
 
 $uid = (int)($_SESSION['enroll_uid'] ?? 0);
-if (!$uid || time() - (int)($_SESSION['enroll_at'] ?? 0) > 900) { unset($_SESSION['enroll_uid'], $_SESSION['enroll_setup']); flash('The setup time ran out. Log in again.', 'warn'); redirect('/login.php'); }
+function clear_enroll(): void { unset($_SESSION['enroll_uid'], $_SESSION['enroll_at'], $_SESSION['enroll_setup'], $_SESSION['enroll_token'], $_SESSION['claim_super']); }
+if (!$uid || time() - (int)($_SESSION['enroll_at'] ?? 0) > 900) { clear_enroll(); flash('The setup time ran out. Log in again.', 'warn'); redirect('/login.php'); }
 $user = one('SELECT * FROM users WHERE id=? AND active=1', [$uid]);
 if (!$user || $user['mfa_enabled']) { unset($_SESSION['enroll_uid']); redirect('/login.php'); }
-if ($user['mfa_token_only'] && empty($_SESSION['enroll_token'])) { unset($_SESSION['enroll_uid']); flash('Ask the super admin for a link to set up two-step login.', 'bad'); redirect('/login.php'); }
+if ($user['mfa_token_only'] && (int)($_SESSION['enroll_token'] ?? 0) !== $uid) { unset($_SESSION['enroll_uid']); flash('Ask the super admin for a link to set up two-step login.', 'bad'); redirect('/login.php'); }
 if (empty($_SESSION['enroll_setup'])) $_SESSION['enroll_setup'] = mfa_new_secret();
 $secret = $_SESSION['enroll_setup'];
 $codes = null; $err = '';
@@ -20,16 +21,18 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
     if ($lock = mfa_locked($uid)) { $err = $lock; }
     elseif (($step = totp_match($secret, post('code'))) !== null) {
         $codes = mfa_recovery_codes();
-        q('UPDATE users SET mfa_secret=?, mfa_enabled=1, mfa_recovery=?, mfa_last_step=?, mfa_token_only=0, last_login=NOW() WHERE id=? AND mfa_enabled=0',
-            [enc($secret), json_encode(array_map(fn($c) => password_hash(str_replace('-', '', $c), PASSWORD_DEFAULT), $codes)), $step, $uid]);
-        unset($_SESSION['enroll_uid'], $_SESSION['enroll_at'], $_SESSION['enroll_setup'], $_SESSION['enroll_token']);
+        $saved = q('UPDATE users SET mfa_secret=?, mfa_enabled=1, mfa_recovery=?, mfa_last_step=?, mfa_token_only=0, last_login=NOW() WHERE id=? AND mfa_enabled=0',
+            [enc($secret), json_encode(array_map(fn($c) => password_hash(str_replace('-', '', $c), PASSWORD_DEFAULT), $codes)), $step, $uid])->rowCount();
+        $claim = ($_SESSION['claim_super'] ?? 0) === $uid;
+        clear_enroll();
+        if ($saved !== 1) { flash('Two-step login was already set up for this account in another window. Log in normally.', 'warn'); redirect('/login.php'); }
         session_regenerate_id(true);
         $_SESSION['uid'] = $uid; $_SESSION['sv'] = (int)$user['session_version']; $_SESSION['csrf'] = bin2hex(random_bytes(32));
         audit_write($uid, 'mfa_enabled', 'user', $uid, 'first setup', client_ip());
-        if (($_SESSION['claim_super'] ?? 0) === $uid) {
-            unset($_SESSION['claim_super']);
-            $n = q("UPDATE users SET role='super_admin' WHERE id=? AND role='admin' AND NOT EXISTS (SELECT 1 FROM (SELECT id FROM users WHERE role='super_admin') x)", [$uid])->rowCount();
-            if ($n) audit_write($uid, 'super_admin_claimed', 'user', $uid, 'Verified with install key, password and new two-step login', client_ip());
+        if ($claim && owner_claim($uid)) {
+            q("UPDATE users SET role='super_admin' WHERE id=? AND role='admin'", [$uid]);
+            audit_write($uid, 'super_admin_claimed', 'user', $uid, 'Verified with install key, password and new two-step login', client_ip());
+            $user['role'] = 'super_admin';
         }
         audit_write($uid, 'login', 'user', $uid, 'with two-step code', client_ip());
     } else { mfa_fail($uid); $err = 'That code did not match. Check the time on your phone and use the newest code.'; }

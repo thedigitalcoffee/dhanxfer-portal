@@ -383,6 +383,11 @@ function scope_where(?array $u, string $alias): array {
     return role_can($u['role'], 'clients.all') ? ['1=1', []] : ['1=0', []];
 }
 function can_see_transfer(array $t): bool { return can_see_client(['agent_id' => $t['agent_id']]); }
+/** Exactly one owner (super admin) claim can ever succeed: the first insert of this settings row wins. */
+function owner_claim(int $uid): bool {
+    return q("INSERT IGNORE INTO settings (k, v) VALUES ('owner_claim', ?)", [(string)$uid])->rowCount() === 1
+        || (string)val("SELECT v FROM settings WHERE k='owner_claim'") === (string)$uid;
+}
 function gen_password(int $len = 12): string {
     $chars = 'ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz23456789';
     $p = '';
@@ -437,6 +442,7 @@ function datalist(string $id, array $list): string {
 }
 
 /* ---------- ID document upload ---------- */
+function ids_dir(): string { global $CONFIG; return rtrim($CONFIG['ids_dir'] ?? (dirname(__DIR__) . '/storage/ids'), '/'); }
 function save_id_upload(string $field): ?string {
     if (empty($_FILES[$field]) || !is_array($_FILES[$field]) || ($_FILES[$field]['error'] ?? UPLOAD_ERR_NO_FILE) === UPLOAD_ERR_NO_FILE) return null;
     $f = $_FILES[$field];
@@ -446,7 +452,7 @@ function save_id_upload(string $field): ?string {
     $ext = ['image/jpeg' => 'jpg', 'image/png' => 'png', 'image/webp' => 'webp', 'application/pdf' => 'pdf', 'image/heic' => 'heic'][$mime] ?? null;
     if (!$ext) throw new RuntimeException('The ID file must be a photo (JPG, PNG, WEBP, HEIC) or a PDF.');
     $name = date('Ymd') . '_' . bin2hex(random_bytes(12)) . '.' . $ext;
-    $dir = dirname(__DIR__) . '/storage/ids';
+    $dir = ids_dir();
     if (!is_dir($dir)) mkdir($dir, 0750, true);
     if (!move_uploaded_file($f['tmp_name'], $dir . '/' . $name)) throw new RuntimeException('The ID file could not be saved.');
     return $name;

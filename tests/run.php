@@ -17,12 +17,28 @@ function mkuser(string $role, string $name, ?string $ref = null): array {
     return one('SELECT * FROM users WHERE id=?', [(int)db()->lastInsertId()]);
 }
 
+// Safety: never touch a database that could be live. The test database must differ from the live config
+// and must be empty or carry the test marker written below.
+(function () {
+    global $CONFIG;
+    $liveCfg = __DIR__ . '/../inc/config.php';
+    if (is_file($liveCfg)) { $live = (function ($f) { return require $f; })($liveCfg); if (($live['db_name'] ?? '') === $CONFIG['db_name']) { echo "REFUSED: test database is the same as the live one.\n"; exit(2); } }
+    if (($CONFIG['environment'] ?? '') === 'live') { echo "REFUSED: environment is live.\n"; exit(2); }
+    $tables = db()->query('SHOW TABLES')->fetchAll(PDO::FETCH_COLUMN);
+    if ($tables) {
+        $marker = in_array('settings', $tables, true) ? db()->query("SELECT v FROM settings WHERE k='db_role'")->fetchColumn() : false;
+        if ($marker !== 'test') { echo "REFUSED: this database is not empty and is not marked as a test database.\n"; exit(2); }
+    }
+    $CONFIG['ids_dir'] = sys_get_temp_dir() . '/dx-test-ids-' . getmypid();
+})();
+function mark_test_db() { q("REPLACE INTO settings (k, v) VALUES ('db_role', 'test')"); }
 function wipe_db() { db()->exec('SET FOREIGN_KEY_CHECKS=0'); foreach (db()->query('SHOW TABLES')->fetchAll(PDO::FETCH_COLUMN) as $t) db()->exec("DROP TABLE `$t`"); }
 require __DIR__ . '/../inc/backup.php';
 
 // ---- 0. upgrade from version 2 with synthetic data ----
 wipe_db();
 foreach (array_filter(array_map('trim', explode(';', file_get_contents(__DIR__ . '/fixtures/schema_v2.sql')))) as $sql) db()->exec($sql);
+mark_test_db();
 db()->exec("INSERT INTO users (role, username, name, password_hash) VALUES ('admin','owner','Synthetic Owner','x'),('admin','second','Synthetic Admin','x'),('agent','agent1','Synthetic Agent','x')");
 db()->exec("INSERT INTO clients (client_no, name, phone, id_number, agent_id) VALUES ('DX-TEST-0001','Synthetic Client','+1 416 555 0100','AB123456',3)");
 db()->exec("INSERT INTO beneficiaries (client_id, name, account) VALUES (1,'Synthetic Beneficiary','000999888777')");
@@ -49,12 +65,14 @@ ok($res['match'] && db_fingerprint() == $before, 'restore brings back an identic
 ok(dec((string)val('SELECT account FROM beneficiaries LIMIT 1')) === '000999888777', 'restored data still decrypts');
 $raw = (string)file_get_contents(backup_dir() . '/' . $bk['file']);
 ok(!str_contains($raw, 'Synthetic') && !str_contains(gzdecode(substr($raw, 4)) ?: '', 'Synthetic'), 'backup file is encrypted (no readable names inside)');
-ok(!str_starts_with(realpath(backup_dir()), realpath(__DIR__ . '/..')), 'backups are stored outside the website folder');
+ok(!str_starts_with(realpath(backup_dir()), realpath(__DIR__ . '/..')) && !str_contains(realpath(backup_dir()), 'public_html'), 'backups are stored outside the website folder');
+ok(str_starts_with(ids_dir(), sys_get_temp_dir()), 'tests use their own ID-file folder, never the real one');
 foreach (glob(backup_dir() . '/dx-*.bak') ?: [] as $f) @unlink($f);
 
 // ---- fresh test database ----
 wipe_db();
 migrate();
+mark_test_db();
 ok((string)setting('schema_version') === SCHEMA_VERSION, 'database builds from scratch to schema ' . SCHEMA_VERSION);
 
 $super = mkuser('super_admin', 'Test Super'); $admin = mkuser('admin', 'Test Admin'); $comp = mkuser('compliance', 'Test Compliance');

@@ -37,6 +37,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                 }
                 session_regenerate_id(true);
                 unset($_SESSION['uid'], $_SESSION['sv']);
+                unset($_SESSION['enroll_setup'], $_SESSION['enroll_token'], $_SESSION['claim_super']);
                 $_SESSION['enroll_uid'] = (int)$u['id']; $_SESSION['enroll_at'] = time();
                 audit_write((int)$u['id'], 'mfa_enroll_started', 'user', $u['id'], 'after password login', $ip);
                 redirect('/mfa_setup.php');

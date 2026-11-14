@@ -4,7 +4,8 @@
 if (PHP_SAPI !== 'cli') { http_response_code(404); exit; }
 $_SERVER['REMOTE_ADDR'] = 'cron';
 require __DIR__ . '/../inc/bootstrap.php';
-if (($CONFIG['environment'] ?? 'live') !== 'staging' || empty($CONFIG['test_users'])) { echo "Refused: test users can only be made on staging.\n"; exit(2); }
+if (($CONFIG['environment'] ?? 'live') !== 'staging' || empty($CONFIG['test_users']) || !str_contains((string)$CONFIG['app_url'], 'staging.') || !str_contains((string)$CONFIG['db_name'], 'staging')) { echo "Refused: test users can only be made on staging.\n"; exit(2); }
+foreach ($CONFIG['test_users'] as $t) if (($t['role'] ?? '') === 'super_admin') { echo "Refused: test users may not be super admins.\n"; exit(2); }
 $made = 0;
 foreach ($CONFIG['test_users'] as $t) {
     if (val('SELECT 1 FROM users WHERE username=?', [$t['username']])) continue;

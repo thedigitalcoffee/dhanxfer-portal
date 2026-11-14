@@ -7,6 +7,10 @@ function backup_dir(): string {
     global $CONFIG;
     $d = $CONFIG['backup_dir'] ?? (dirname(__DIR__, 2) . '/dx-backups' . (defined('DX_TEST') ? '-test' : ''));
     if (!is_dir($d)) mkdir($d, 0700, true);
+    $real = realpath($d) ?: $d;
+    $docroot = realpath((string)($_SERVER['DOCUMENT_ROOT'] ?? '')) ?: '';
+    if (str_contains($real, '/public_html') || ($docroot !== '' && str_starts_with($real, $docroot)) || str_starts_with($real, realpath(dirname(__DIR__)) ?: dirname(__DIR__)))
+        throw new RuntimeException('Refusing to keep backups inside the website folder: ' . $real);
     return $d;
 }
 /** Per-table row count + hash of every row, to prove a restore is identical. */
@@ -26,8 +30,7 @@ function backup_create(string $label = 'nightly'): array {
         $create = db()->query("SHOW CREATE TABLE `$t`")->fetch(PDO::FETCH_NUM)[1];
         $data['tables'][$t] = ['create' => $create, 'rows' => db()->query("SELECT * FROM `$t`")->fetchAll(PDO::FETCH_ASSOC)];
     }
-    $ids = dirname(__DIR__) . '/storage/ids';
-    foreach (glob($ids . '/*') ?: [] as $f) if (is_file($f)) $data['files'][basename($f)] = base64_encode((string)file_get_contents($f));
+    foreach (glob(ids_dir() . '/*') ?: [] as $f) if (is_file($f)) $data['files'][basename($f)] = base64_encode((string)file_get_contents($f));
     $plain = gzencode(json_encode($data, JSON_UNESCAPED_UNICODE | JSON_INVALID_UTF8_SUBSTITUTE), 6);
     $nonce = random_bytes(SODIUM_CRYPTO_SECRETBOX_NONCEBYTES);
     $blob = 'DXB1' . $nonce . sodium_crypto_secretbox($plain, $nonce, sec_key('backup'));
@@ -68,9 +71,11 @@ function backup_restore(string $name): array {
         }
     }
     db()->exec('SET FOREIGN_KEY_CHECKS=1');
-    $ids = dirname(__DIR__) . '/storage/ids';
+    $ids = ids_dir();
     if (!is_dir($ids)) mkdir($ids, 0750, true);
+    foreach (glob($ids . '/*') ?: [] as $f) if (is_file($f) && !isset($data['files'][basename($f)])) @unlink($f); // files added after the backup
     foreach ($data['files'] as $f => $b64) file_put_contents($ids . '/' . basename($f), base64_decode($b64));
+    // Note: after a restore the activity-log checkpoint check will report rows written after the backup as missing. Expected.
     $now = db_fingerprint();
     return ['match' => $now == $data['fingerprint'], 'tables' => count($data['tables']), 'made' => $data['made']];
 }
