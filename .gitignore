@@ -1,0 +1,4 @@
+inc/config.php
+inc/config.test.php
+storage/ids/*
+!storage/ids/.keep

@@ -1,0 +1,14 @@
+Options -Indexes
+DirectoryIndex index.php
+
+<IfModule mod_rewrite.c>
+RewriteEngine On
+# Short link for clients: /register
+RewriteRule ^register/?$ register.php [L,QSA]
+# Block hidden files, the code folder and uploaded IDs from direct access
+RewriteRule (^|/)\.(?!well-known) - [F]
+RewriteRule ^(inc|storage)(/|$) - [F]
+RewriteRule \.(sql|md|log|bak)$ - [F]
+</IfModule>
+
+AddType application/manifest+json .webmanifest

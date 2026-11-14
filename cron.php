@@ -1,0 +1,20 @@
+<?php
+// Runs every hour from the Hostinger cron. Sends the daily rate proposal once a day after the chosen time.
+if (PHP_SAPI !== 'cli') { http_response_code(404); exit; }
+$_SERVER['REMOTE_ADDR'] = 'cron';
+require __DIR__ . '/inc/bootstrap.php';
+require __DIR__ . '/inc/rates.php';
+
+// Keep a daily record of the market rate, whether or not Telegram is set up.
+if (setting('last_market_date') !== today()) {
+    $n = record_market_today();
+    if ($n) set_setting('last_market_date', today());
+    echo date('c') . " market rates recorded for $n pair(s)\n";
+}
+if (setting('rates_on', '1') !== '1' || !tg_token()) exit(0);
+$sendAt = setting('send_time', '09:00');
+if (date('H:i') < $sendAt) exit(0);
+if (setting('last_proposal_date') === today()) exit(0);
+set_setting('last_proposal_date', today());
+$n = send_daily_proposal();
+echo date('c') . " proposal sent to $n admin(s)\n";
