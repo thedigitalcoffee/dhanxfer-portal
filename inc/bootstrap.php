@@ -68,20 +68,32 @@ function db(): PDO {
         // Any truncation or bad value is an error, never silently stored
         $modes = array_filter(explode(',', (string)$pdo->query('SELECT @@SESSION.sql_mode')->fetchColumn()));
         if (!in_array('STRICT_ALL_TABLES', $modes, true)) { $modes[] = 'STRICT_ALL_TABLES'; $pdo->exec("SET SESSION sql_mode = '" . implode(',', $modes) . "'"); }
-        if (!defined('DX_NO_AUTO_MIGRATE') && ($CONFIG['auto_migrate'] ?? true)) migrate();
+        // Live upgrades run only through tools/migrate.php (after a backup); staging and tests upgrade on their own.
+        if (!defined('DX_NO_AUTO_MIGRATE') && ($CONFIG['auto_migrate'] ?? (($CONFIG['environment'] ?? 'live') !== 'live'))) migrate();
+        // New code must never serve an old database: web pages wait until the upgrade is done.
+        if (PHP_SAPI !== 'cli' && !schema_current()) {
+            http_response_code(503); header('Retry-After: 1800'); header('Content-Type: text/html; charset=utf-8');
+            exit('<!doctype html><meta name="viewport" content="width=device-width,initial-scale=1"><title>DhanXfer</title><div style="font-family:system-ui;max-width:420px;margin:15vh auto;padding:0 20px;text-align:center"><h1>Back soon</h1><p>The DhanXfer portal is being upgraded. Please try again shortly.</p></div>');
+        }
     }
     return $pdo;
 }
 
 const SCHEMA_VERSION = '6';
+/** True when the database is at the version this code expects. */
+function schema_current(): bool {
+    try { return (string)db()->query("SELECT v FROM settings WHERE k='schema_version'")->fetchColumn() === SCHEMA_VERSION; } catch (Throwable $e) { return false; }
+}
+/** Named locks are shared by every database on the server, so each name carries this database's name. */
+function lock_name(string $n): string { global $CONFIG; return $n . ':' . $CONFIG['db_name']; }
 /** Creates missing tables/columns after an upload of a newer version. Runs one cheap query per request. */
 function migrate(): void {
     $ver = null;
     try { $ver = db()->query("SELECT v FROM settings WHERE k='schema_version'")->fetchColumn(); } catch (Throwable $e) { $ver = null; }
     if ($ver === SCHEMA_VERSION) return;
     // One upgrade at a time: a second request waits, then finds the work done.
-    if ((int)db()->query("SELECT GET_LOCK('dx_migrate', 60)")->fetchColumn() !== 1) throw new RuntimeException('Another upgrade is running. Try again in a minute.');
-    try { migrate_locked($ver === false ? null : $ver); } finally { db()->query("SELECT RELEASE_LOCK('dx_migrate')"); }
+    if ((int)val('SELECT GET_LOCK(?, 60)', [lock_name('dx_migrate')]) !== 1) throw new RuntimeException('Another upgrade is running. Try again in a minute.');
+    try { migrate_locked($ver === false ? null : $ver); } finally { val('SELECT RELEASE_LOCK(?)', [lock_name('dx_migrate')]); }
 }
 function migrate_locked(?string $ver): void {
     $ver2 = db()->query("SELECT COUNT(*) FROM information_schema.TABLES WHERE TABLE_SCHEMA=DATABASE() AND TABLE_NAME='settings'")->fetchColumn()
@@ -203,7 +215,12 @@ function csrf_check(): void {
         }
     }
 }
-function client_ip(): string { return substr((string)($_SERVER['REMOTE_ADDR'] ?? ''), 0, 45); }
+/** The visitor's address. IPv6 addresses are grouped by /64, since one home or phone usually owns a whole /64. */
+function client_ip(): string {
+    $ip = (string)($_SERVER['REMOTE_ADDR'] ?? '');
+    if (filter_var($ip, FILTER_VALIDATE_IP, FILTER_FLAG_IPV6) && ($bin = @inet_pton($ip)) !== false) $ip = inet_ntop(substr($bin, 0, 8) . str_repeat("\0", 8)) . '/64';
+    return substr($ip, 0, 45);
+}
 function money($n, string $cur = ''): string {
     if ($n === null || $n === '') return '';
     return number_format((float)$n, 2) . ($cur ? ' ' . $cur : '');
@@ -312,7 +329,7 @@ function audit(string $action, string $entity = '', $entityId = null, string $de
  */
 function audit_write(?int $userId, string $action, string $entity, $entityId, string $detail, string $ip): void {
     $detail = mb_substr($detail, 0, 500);
-    $lock = (int)db()->query("SELECT GET_LOCK('dx_audit', 10)")->fetchColumn();
+    $lock = (int)val('SELECT GET_LOCK(?, 10)', [lock_name('dx_audit')]);
     if (!$lock) throw new RuntimeException('The activity log is busy. Please try again.');
     try {
         $prev = (string)(db()->query('SELECT row_hash FROM audit ORDER BY id DESC LIMIT 1')->fetchColumn() ?: '');
@@ -320,7 +337,7 @@ function audit_write(?int $userId, string $action, string $entity, $entityId, st
         $hash = audit_hash($prev, $userId, $action, $entity, $entityId, $detail, $ip, $at);
         q('INSERT INTO audit (user_id, action, entity, entity_id, detail, ip, created_at, prev_hash, row_hash) VALUES (?,?,?,?,?,?,?,?,?)',
             [$userId, $action, $entity, $entityId, $detail, $ip, $at, $prev ?: null, $hash]);
-    } finally { db()->query("SELECT RELEASE_LOCK('dx_audit')"); }
+    } finally { val('SELECT RELEASE_LOCK(?)', [lock_name('dx_audit')]); }
 }
 function audit_hash(string $prev, $userId, string $action, ?string $entity, $entityId, ?string $detail, ?string $ip, string $at): string {
     $msg = '';

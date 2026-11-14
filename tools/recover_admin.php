@@ -9,5 +9,6 @@ require __DIR__ . '/../inc/bootstrap.php';
 require __DIR__ . '/../inc/recovery.php';
 $arg = (string)($argv[1] ?? '');
 if ($arg === '--clear-claim') { echo clear_owner_claim() ? "Cleared. The owner can claim super admin again at /install.php with the install key.\n" : "A working super admin exists: recover that account instead.\n"; exit; }
-$link = $arg !== '' ? recover_super($arg) : null;
-echo $link ? "One-time link for $arg (24 hours). Open it, set a new password, then scan the new two-step code:\n$link\n" : "No super admin with that login ID.\n";
+// Run this over SSH so the link is not kept in cron output or emails.
+$link = $arg !== '' ? recover_super($arg, in_array('--reactivate', $argv, true)) : null;
+echo $link ? "One-time link for $arg (24 hours). Open it, set a new password, then scan the new two-step code:\n$link\n" : "No active super admin with that login ID (add --reactivate for a switched-off one).\n";

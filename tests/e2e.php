@@ -218,6 +218,13 @@ $co2->post('/?p=agents', ['id' => (int)val("SELECT id FROM users WHERE username=
 ok((int)val("SELECT active FROM users WHERE username='test.admin'") === 1, 'a compliance officer cannot switch off the super admin');
 $cl3 = new Browser(); $cl3->req('/install.php', null, false); ok($cl3->code === 404, 'install page stays closed while a working super admin exists');
 
+q('DELETE FROM login_attempts');
+$pad = new Browser(); $pad->req('/login.php');
+for ($i = 0; $i < 10; $i++) $pad->req('/login.php', ['csrf' => $pad->csrf() ?: 'x', 'username' => 'test.agent2' . str_repeat("\x01", 60), 'password' => 'wrong-' . $i]);
+ok($pad->code === 200 && (int)val("SELECT COUNT(*) FROM login_attempts WHERE ip<>'203.0.113.9'") >= 10, 'login IDs padded with invisible characters are refused and still counted (no 500 error)', (string)$pad->code);
+$pad->req('/login.php'); $pad->req('/login.php', ['csrf' => $pad->csrf(), 'username' => 'test.agent2', 'password' => $T['test.agent2']['password']]);
+ok(str_contains($pad->body, 'Too many wrong attempts'), 'after 10 such tries that connection is blocked');
+q('DELETE FROM login_attempts');
 // ---- 9. emergency recovery from the server (lost phone and recovery codes) ----
 $sid = (int)val("SELECT id FROM users WHERE username='test.admin'");
 $oldPw = $T['test.admin']['password']; $oldSecret = $T['test.admin']['mfa_secret'];
@@ -259,7 +266,7 @@ $vc->req('/install.php', ['csrf' => $vc->csrf(), 'install_key' => $CONFIG['insta
 $sec2 = preg_match('/letter-spacing:\.08em;font-size:17px">([A-Z2-7 ]+)</', $vc->body, $sm2) ? str_replace(' ', '', $sm2[1]) : '';
 ok($sec2 !== '' && val('SELECT role FROM users WHERE id=?', [$v2]) === 'admin', 'install key + password lead to two-step setup; still admin until the code is confirmed');
 $vc->req('/?p=clients', null, false); ok(in_array($vc->code, [302, 303], true), 'no session during the claim before the code');
-$vc->req('/mfa_setup.php', ['csrf' => $vc->csrf(), 'code' => totp_code($sec2, intdiv(time(), 30))]);
+$vc->req('/mfa_setup.php'); $vc->req('/mfa_setup.php', ['csrf' => $vc->csrf(), 'code' => totp_code($sec2, intdiv(time(), 30))]);
 ok(val('SELECT role FROM users WHERE id=?', [$v2]) === 'super_admin' && (int)val('SELECT mfa_enabled FROM users WHERE id=?', [$v2]) === 1, 'after the code the v2 admin is super admin with two-step login');
 $vc2 = new Browser(); $vc2->req('/install.php', null, false); ok($vc2->code === 404, 'install page closes after the claim');
 q('DELETE FROM users WHERE id=?', [$v2]); q("DELETE FROM settings WHERE k='owner_claim'");

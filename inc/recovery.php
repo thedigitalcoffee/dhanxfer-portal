@@ -3,13 +3,12 @@ defined('DX') or exit;
 /* Emergency owner recovery. Only reachable from the server (tools/recover_admin.php), i.e. by whoever controls the hosting account. */
 
 /** Clears a super admin's two-step login and password, ends their sessions, returns a one-time link (24 hours). */
-function recover_super(string $login): ?string {
+function recover_super(string $login, bool $reactivate = false): ?string {
     $u = one("SELECT * FROM users WHERE username=? AND role='super_admin'", [mb_strtolower($login)]);
-    if (!$u) return null;
-    q('UPDATE password_resets SET used_at=NOW() WHERE user_id=? AND used_at IS NULL', [$u['id']]);
+    if (!$u || (!$u['active'] && !$reactivate)) return null;
+    $link = make_reset_link((int)$u['id'], 0, 'reset'); // first: if this fails, nothing has changed
     q('UPDATE users SET active=1, mfa_enabled=0, mfa_secret=NULL, mfa_recovery=NULL, mfa_token_only=1, password_hash=?, session_version=session_version+1 WHERE id=?', [password_hash(bin2hex(random_bytes(32)), PASSWORD_DEFAULT), $u['id']]);
     q('DELETE FROM login_attempts WHERE username IN (?, ?)', [$u['username'], 'mfa:' . $u['id']]);
-    $link = make_reset_link((int)$u['id'], 0, 'reset');
     audit_write(null, 'break_glass', 'user', $u['id'], 'Super admin ' . $u['username'] . ' recovered from the server', 'cron');
     notify('Security: emergency owner recovery used', 'The server recovery tool was used for ' . $u['username'] . ' at ' . date('Y-m-d H:i') . '. If this was not you, someone has access to the hosting account.', 'security_alert');
     return $link;

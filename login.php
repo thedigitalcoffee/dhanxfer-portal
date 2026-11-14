@@ -12,6 +12,9 @@ if (!preg_match('#^/(?![/\\\\])[^\\s]*$#', $next)) $next = '/';
 if ($_SERVER['REQUEST_METHOD'] === 'POST') {
     csrf_check();
     $username = mb_strtolower(post('username'));
+    // Login IDs are 3–60 letters, digits or . _ @ + -. Anything else is refused before the database is asked, and still
+    // counts against the connection (padding with invisible characters cannot dodge the limits).
+    if (!preg_match('/^[\p{L}\p{N}._@+-]{3,60}$/u', $username)) { q("INSERT INTO login_attempts (ip, username) VALUES (?, 'bad-id')", [client_ip()]); $username = 'bad-id'; }
     $password = $_POST['password'] ?? '';
     $ip = client_ip();
     $win = "username NOT LIKE 'mfa:%' AND username NOT LIKE 'status-ref:%' AND username NOT IN ('status-check','install') AND at > (NOW() - INTERVAL 15 MINUTE)";
@@ -22,9 +25,10 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
     // Accounts with two-step login are not locked by failures from other connections: the code still protects them,
     // and a stranger must not be able to lock the owner out by typing wrong passwords. We alert instead.
     $userLock = $userFails >= 6 && !($acct && (int)$acct['mfa_enabled'] === 1);
-    if ($acct && (int)$acct['mfa_enabled'] === 1 && $userFails === 20) {
-        audit_write((int)$acct['id'], 'login_alert', 'user', $acct['id'], '20 wrong passwords in 15 minutes', $ip);
-        notify('Security alert: many wrong passwords', "Login ID $username had 20 wrong passwords in 15 minutes. Two-step login still protects the account.", 'security_alert');
+    if ($userFails >= 10) usleep(min($userFails, 30) * 100000); // slows guessing from many addresses without locking the owner out
+    if ($acct && (int)$acct['mfa_enabled'] === 1 && $userFails >= 20 && !(int)val("SELECT COUNT(*) FROM audit WHERE action='login_alert' AND entity_id=? AND created_at > (NOW() - INTERVAL 15 MINUTE)", [$acct['id']])) {
+        audit_write((int)$acct['id'], 'login_alert', 'user', $acct['id'], "$userFails wrong passwords in 15 minutes", $ip);
+        notify('Security alert: many wrong passwords', "Login ID $username had $userFails wrong passwords in 15 minutes. Two-step login still protects the account.", 'security_alert');
     }
     if ($ipFails >= 10 || $pairFails >= 6 || $userLock) {
         $error = 'Too many wrong attempts. Wait 15 minutes and try again, or ask an admin to reset your password.';

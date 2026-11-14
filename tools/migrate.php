@@ -11,6 +11,7 @@ $log = function (string $s) { echo $s, "\n"; @file_put_contents(data_dir() . '/m
 $log(date('c') . '  upgrade started');
 $recent = array_filter(glob(backup_dir() . '/dx-*.bak') ?: [], fn($f) => filemtime($f) > time() - 7200);
 if (!$recent) { $log('STOPPED: no backup from the last 2 hours. Run php tools/backup.php pre-upgrade first.'); exit(2); }
+if (($CONFIG['environment'] ?? 'live') === 'live' && empty($CONFIG['maintenance'])) { $log("STOPPED: turn on 'maintenance' => true in the settings file first, so nobody uses the portal during the upgrade."); exit(2); }
 if (!enc_ready()) { $log('STOPPED: no encryption key in the settings file.'); exit(2); }
 $before = setting('schema_version') ?? '(none)';
 $log('Backup found: ' . basename(end($recent)) . ' · schema before: ' . $before);

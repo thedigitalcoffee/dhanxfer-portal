@@ -59,10 +59,19 @@ if (in_array('users', $tables, true)) {
     $hasMfa = (bool)$col('users', 'mfa_enabled');
     $mfaRoles = (int)$pdo->query("SELECT COUNT(*) FROM users WHERE active=1 AND role IN ('" . implode("','", MFA_REQUIRED) . "')" . ($hasMfa ? ' AND mfa_enabled=0' : ''))->fetchColumn();
     $p("After the upgrade: $mfaRoles active admin-level account(s) must set up two-step login through a link from the owner; 0 are promoted to super admin.");
+    $badIds = 0; foreach ($pdo->query('SELECT username FROM users') as $r) if (!preg_match('/^[\p{L}\p{N}._@+-]{3,60}$/u', mb_strtolower((string)$r['username']))) $badIds++;
+    $p("Login IDs the new login page would refuse: $badIds"); if ($badIds) $stop[] = "$badIds login ID(s) would be refused by the new login page";
     $dupMail = (int)$pdo->query("SELECT COUNT(*) FROM (SELECT email FROM users WHERE email IS NOT NULL AND email<>'' GROUP BY email HAVING COUNT(*)>1) x")->fetchColumn();
     $noMail = (int)$pdo->query("SELECT COUNT(*) FROM users WHERE active=1 AND (email IS NULL OR email='')")->fetchColumn();
     $p("Active accounts without an email address: $noMail (they get links by WhatsApp instead) · shared email addresses: $dupMail");
 }
+// Old non-strict databases can hold zero dates, which stop a table rebuild under strict mode
+$zero = 0;
+foreach ($pdo->query("SELECT TABLE_NAME t, COLUMN_NAME c FROM information_schema.COLUMNS WHERE TABLE_SCHEMA=DATABASE() AND TABLE_NAME IN ('clients','beneficiaries','users') AND DATA_TYPE IN ('date','datetime','timestamp')")->fetchAll() as $dc)
+    $zero += (int)$pdo->query("SELECT COUNT(*) FROM `{$dc['t']}` WHERE CAST(`{$dc['c']}` AS CHAR) LIKE '0000-00-00%'")->fetchColumn();
+$p("Zero dates in tables the upgrade rebuilds: $zero"); if ($zero) $stop[] = "$zero zero date(s) must be cleared before the upgrade";
+$myisam = (int)$pdo->query("SELECT COUNT(*) FROM information_schema.TABLES WHERE TABLE_SCHEMA=DATABASE() AND ENGINE<>'InnoDB'")->fetchColumn();
+if ($myisam) $warn[] = "$myisam table(s) are not InnoDB (no rollback for them)";
 // Links between records
 $orph = function (string $sql) use ($pdo) { try { return (int)$pdo->query($sql)->fetchColumn(); } catch (Throwable $e) { return -1; } };
 $p('Records pointing at missing records: '

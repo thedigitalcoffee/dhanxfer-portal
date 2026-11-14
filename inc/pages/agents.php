@@ -37,7 +37,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
             [$role, $username, $name, post('phone') ?: null, post('email') ?: null, in_array(post('office'), OFFICES, true) ? post('office') : null, $ref, mb_substr(post('commission_note'), 0, 250) ?: null, password_hash(bin2hex(random_bytes(32)), PASSWORD_DEFAULT), $u['id']]);
         $nid = (int)db()->lastInsertId();
         audit('create_user', 'user', $nid, "$role $username");
-        $_SESSION['show_link'] = ['name' => $name, 'username' => $username, 'link' => make_reset_link($nid, (int)$u['id'], 'activate'), 'purpose' => 'activate', 'ref' => $ref];
+        $_SESSION['show_link'] = ['name' => $name, 'username' => $username, 'link' => make_reset_link($nid, (int)$u['id'], 'activate'), 'purpose' => 'activate', 'ref' => $ref, 'uid' => $nid];
         redirect('/?p=agents&id=' . $nid);
     }
     $target = one('SELECT * FROM users WHERE id=?', [(int)post('id')]);
@@ -49,7 +49,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
     // Never leave the business without a working super admin. Checks run one at a time (lock held until the
     // request ends), so two super admins switching each other off at the same moment cannot both succeed.
     if ($target['role'] === 'super_admin' && in_array($act, ['disable', 'role', 'mfa_reset', 'reset_link'], true) && !($act === 'role' && post('role') === 'super_admin')) {
-        val("SELECT GET_LOCK('dx_supers', 10)");
+        if ((int)val('SELECT GET_LOCK(?, 10)', [lock_name('dx_supers')]) !== 1) { flash('Busy, try again in a moment.', 'bad'); redirect('/?p=agents&id=' . $target['id']); }
         if ((int)val("SELECT COUNT(*) FROM users WHERE role='super_admin' AND active=1 AND mfa_enabled=1 AND id<>?", [$target['id']]) < 1) {
             flash('At least one other super admin with two-step login must stay active, so this change is not allowed.', 'bad'); redirect('/?p=agents&id=' . $target['id']);
         }
@@ -78,7 +78,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
         q('UPDATE users SET password_hash=?, session_version=session_version+1 WHERE id=?', [password_hash(bin2hex(random_bytes(32)), PASSWORD_DEFAULT), $target['id']]);
         audit('reset_link', 'user', $target['id'], $target['username']);
         notify_user((int)$target['id'], 'Security notice: your DhanXfer password was reset', "Hi {$target['name']},\n\nA DhanXfer admin has reset the password for your portal account ({$target['username']}). Your old password no longer works. You will get a one-time link to choose a new one.\n\nIf you did not expect this, contact DhanXfer right away.");
-        $_SESSION['show_link'] = ['name' => $target['name'], 'username' => $target['username'], 'link' => $link, 'purpose' => $target['last_login'] ? 'reset' : 'activate', 'ref' => $target['ref_code']];
+        $_SESSION['show_link'] = ['name' => $target['name'], 'username' => $target['username'], 'link' => $link, 'purpose' => $target['last_login'] ? 'reset' : 'activate', 'ref' => $target['ref_code'], 'uid' => (int)$target['id']];
     } elseif ($act === 'email_link') {
         $ml = $_SESSION['mail_link'] ?? null; unset($_SESSION['mail_link']);
         if (!$ml || (int)$ml['uid'] !== (int)$target['id'] || time() - (int)$ml['at'] > 900 || !$target['email']) { flash('Make a new link first, then email it right away (the person needs an email address on file).', 'bad'); redirect('/?p=agents&id=' . $target['id']); }
@@ -93,7 +93,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
         notify('Security: two-step login reset for ' . $target['username'], 'Two-step login was reset for ' . $target['username'] . ' by ' . $u['username'] . '.', 'security_alert');
         try { $link = make_reset_link((int)$target['id'], (int)$u['id']); } catch (RuntimeException $ex) { flash($ex->getMessage(), 'bad'); redirect('/?p=agents&id=' . $target['id']); }
         q('UPDATE users SET password_hash=? WHERE id=?', [password_hash(bin2hex(random_bytes(32)), PASSWORD_DEFAULT), $target['id']]);
-        $_SESSION['show_link'] = ['name' => $target['name'], 'username' => $target['username'], 'link' => $link, 'purpose' => 'reset', 'ref' => null];
+        $_SESSION['show_link'] = ['name' => $target['name'], 'username' => $target['username'], 'link' => $link, 'purpose' => 'reset', 'ref' => null, 'uid' => (int)$target['id']];
         flash('Two-step login was reset. Send ' . $target['name'] . ' this link: they set a new password and two-step login with it.');
     } elseif ($act === 'role') {
         $nr = post('role');
@@ -107,6 +107,9 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
         q('UPDATE users SET active=1 WHERE id=?', [$target['id']]); audit('enable_user', 'user', $target['id'], $target['username']); flash($target['name'] . ' can log in again.');
     } elseif ($act === 'save') {
         q('UPDATE users SET name=?, phone=?, email=?, office=?, commission_note=? WHERE id=?', [mb_substr(post('name'), 0, 120) ?: $target['name'], post('phone') ?: null, post('email') ?: null, in_array(post('office'), OFFICES, true) ? post('office') : null, mb_substr(post('commission_note'), 0, 250) ?: null, $target['id']]);
+        $newMail = (string)(post('email') ?: '');
+        if ((string)$target['email'] !== '' && strcasecmp((string)$target['email'], $newMail) !== 0)
+            send_mail((string)$target['email'], 'Security notice: the email on your DhanXfer account changed', "Hi {$target['name']},\n\nThe email address on your DhanXfer portal account ({$target['username']}) was changed by {$u['username']}. Security notices now go to the new address.\n\nIf you did not expect this, contact DhanXfer right away.", 'security_alert');
         audit('edit_user', 'user', $target['id'], $target['username']); flash('Details saved.');
     }
     redirect('/?p=agents&id=' . $target['id']);
@@ -115,7 +118,8 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
 $base = rtrim($CONFIG['app_url'], '/');
 if (isset($_SESSION['show_secret'])) { $secret = $_SESSION['show_secret']; unset($_SESSION['show_secret']); }
 $showLink = null;
-if (isset($_SESSION['show_link'])) { $showLink = $_SESSION['show_link']; unset($_SESSION['show_link']); $_SESSION['mail_link'] = $showLink + ['at' => time(), 'uid' => (int)get('id')]; }
+// The link is shown, and can be emailed, only on the page of the person it was made for.
+if (isset($_SESSION['show_link']) && (int)($_SESSION['show_link']['uid'] ?? 0) === (int)get('id')) { $showLink = $_SESSION['show_link']; unset($_SESSION['show_link']); $_SESSION['mail_link'] = $showLink + ['at' => time()]; }
 
 if (get('id') !== '') {
     $a = one('SELECT * FROM users WHERE id=?', [(int)get('id')]);

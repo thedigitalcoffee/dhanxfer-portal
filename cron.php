@@ -4,6 +4,7 @@ if (PHP_SAPI !== 'cli') { http_response_code(404); exit; }
 $_SERVER['REMOTE_ADDR'] = 'cron';
 require __DIR__ . '/inc/bootstrap.php';
 require __DIR__ . '/inc/rates.php';
+if (!empty($CONFIG['maintenance']) || !schema_current()) { echo date('c') . " skipped: maintenance or upgrade pending\n"; exit; }
 
 // Keep a daily record of the market rate, whether or not Telegram is set up.
 if (setting('last_market_date') !== today()) {
