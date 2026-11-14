@@ -2,10 +2,18 @@
 declare(strict_types=1);
 define('DX', true);
 
-$CONFIG = require __DIR__ . (defined('DX_TEST') ? '/config.test.php' : '/config.php');
-// Optional: secrets kept one level above public_html override the ones in inc/config.php.
-$__outside = dirname(__DIR__, 2) . '/dx-secrets.php';
-if (!defined('DX_TEST') && is_file($__outside)) { $__s = require $__outside; if (is_array($__s)) $CONFIG = array_merge($CONFIG, $__s); }
+/*
+ * Settings live OUTSIDE the website folder (one level above public_html) so deploys never overwrite or expose them:
+ *   dx-config.php       live/staging settings and keys
+ *   dx-config.test.php  test database settings
+ * inc/config.php is only a fallback for the first upload; tools/move_secrets.php moves it out.
+ */
+$__name = defined('DX_TEST') ? 'dx-config.test.php' : 'dx-config.php';
+$__outside = dirname(__DIR__, 2) . '/' . $__name;
+$__inside = __DIR__ . (defined('DX_TEST') ? '/config.test.php' : '/config.php');
+$CONFIG = require (is_file($__outside) ? $__outside : $__inside);
+/** Folder for ID documents, checkpoints and reports: outside the website folder once settings are moved out. */
+function data_dir(): string { global $CONFIG; return rtrim($CONFIG['data_dir'] ?? (dirname(__DIR__) . '/storage'), '/'); }
 date_default_timezone_set($CONFIG['timezone'] ?? 'America/Toronto');
 
 function is_https(): bool {
@@ -306,7 +314,7 @@ function audit_verify(): array {
     if ($anchor && (!isset($seen[$anchor['id']]) || !hash_equals($seen[$anchor['id']], $anchor['hash']))) $problem = 'Rows up to #' . $anchor['id'] . ' were in the log on ' . $anchor['at'] . ' but are now missing or changed.';
     return [$n, null, $legacy, $problem];
 }
-function audit_anchor_file(): string { return dirname(__DIR__) . '/storage/audit-anchors' . (defined('DX_TEST') ? '.test' : '') . '.log'; }
+function audit_anchor_file(): string { return data_dir() . '/audit-anchors' . (defined('DX_TEST') ? '.test' : '') . '.log'; }
 /** Saves today's newest row and its hash outside the database. Returns the line written. */
 function audit_write_anchor(): ?string {
     $r = db()->query('SELECT id, row_hash FROM audit WHERE row_hash IS NOT NULL ORDER BY id DESC LIMIT 1')->fetch();
@@ -442,7 +450,7 @@ function datalist(string $id, array $list): string {
 }
 
 /* ---------- ID document upload ---------- */
-function ids_dir(): string { global $CONFIG; return rtrim($CONFIG['ids_dir'] ?? (dirname(__DIR__) . '/storage/ids'), '/'); }
+function ids_dir(): string { global $CONFIG; return rtrim($CONFIG['ids_dir'] ?? (data_dir() . '/ids'), '/'); }
 function save_id_upload(string $field): ?string {
     if (empty($_FILES[$field]) || !is_array($_FILES[$field]) || ($_FILES[$field]['error'] ?? UPLOAD_ERR_NO_FILE) === UPLOAD_ERR_NO_FILE) return null;
     $f = $_FILES[$field];

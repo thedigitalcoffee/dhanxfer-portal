@@ -32,7 +32,7 @@ function mkuser(string $role, string $name, ?string $ref = null): array {
 // and must be empty or carry the test marker written below.
 (function () {
     global $CONFIG;
-    $liveCfg = __DIR__ . '/../inc/config.php';
+    $liveCfg = is_file(dirname(__DIR__, 2) . '/dx-config.php') ? dirname(__DIR__, 2) . '/dx-config.php' : __DIR__ . '/../inc/config.php';
     if (is_file($liveCfg)) { $live = (function ($f) { return require $f; })($liveCfg); if (($live['db_name'] ?? '') === $CONFIG['db_name']) { echo "REFUSED: test database is the same as the live one.\n"; exit(2); } }
     if (($CONFIG['environment'] ?? '') === 'live') { echo "REFUSED: environment is live.\n"; exit(2); }
     $tables = db()->query('SHOW TABLES')->fetchAll(PDO::FETCH_COLUMN);
@@ -212,6 +212,7 @@ $summary = sprintf("%s  %d passed, %d failed\n", date('Y-m-d H:i:s'), $pass, $fa
 $report = $summary . implode("\n", $out) . "\n";
 echo $report;
 @file_put_contents(__DIR__ . '/../storage/test-report.txt', $report);
+@file_put_contents(data_dir() . '/test-report.txt', $report);
 // leave the test database empty
 wipe_db();
 $finished = true;
