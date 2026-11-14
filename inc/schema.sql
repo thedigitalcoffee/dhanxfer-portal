@@ -376,3 +376,29 @@ CREATE TABLE IF NOT EXISTS agent_codes (
   UNIQUE KEY code (code),
   INDEX (agent_id)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+
+CREATE TABLE IF NOT EXISTS beneficiary_events (
+  id INT UNSIGNED AUTO_INCREMENT PRIMARY KEY,
+  beneficiary_id INT UNSIGNED NOT NULL,
+  client_id INT UNSIGNED NOT NULL,
+  action VARCHAR(30) NOT NULL,
+  fields VARCHAR(255) NULL,
+  note VARCHAR(500) NULL,
+  user_id INT UNSIGNED NULL,
+  at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  INDEX (beneficiary_id), INDEX (client_id)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+
+CREATE TABLE IF NOT EXISTS client_otps (
+  id INT UNSIGNED AUTO_INCREMENT PRIMARY KEY,
+  client_id INT UNSIGNED NOT NULL,
+  purpose VARCHAR(20) NOT NULL,
+  channel VARCHAR(10) NOT NULL,
+  code_hash CHAR(64) NOT NULL,
+  expires_at DATETIME NOT NULL,
+  attempts INT NOT NULL DEFAULT 0,
+  used_at DATETIME NULL,
+  ip VARCHAR(45) NULL,
+  created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  INDEX (client_id, purpose, created_at)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;

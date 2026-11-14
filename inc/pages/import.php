@@ -58,7 +58,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                     $p = array_map('trim', explode(' / ', $chunk));
                     if (($p[0] ?? '') !== '') $b[] = ['name' => $p[0], 'relation' => $p[1] ?? '', 'country' => $p[2] ?? '', 'bank' => $p[3] ?? '', 'account' => $p[4] ?? '', 'phone' => $p[5] ?? ''];
                 }
-                save_beneficiaries($cid, $b);
+                save_beneficiaries($cid, $b, 'import', (int)$u['id']);
                 $added++;
             }
         } elseif ($kind === 'log') {

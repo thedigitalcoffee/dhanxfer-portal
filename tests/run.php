@@ -10,6 +10,8 @@ require __DIR__ . '/../inc/clientform.php';
 require __DIR__ . '/../inc/rates.php';
 require __DIR__ . '/../inc/mfa.php';
 require __DIR__ . '/../inc/compliance.php';
+require __DIR__ . '/../inc/beneficiary.php';
+require __DIR__ . '/../inc/otp.php';
 
 $pass = 0; $fail = 0; $out = []; $finished = false;
 // If anything crashes, still write what ran, plus the error, to the report.
@@ -100,6 +102,7 @@ ok($c1doc && $c1doc['source'] === 'migration' && dec($c1doc['number_enc']) === '
 ok(agent_by_code('agent1') && (int)agent_by_code('agent1')['id'] === (int)val("SELECT id FROM users WHERE username='agent1'"), 'upgrade gives each sub-agent their login ID as referral code');
 ok(val("SELECT phone_e164 FROM clients WHERE client_no='DX-TEST-0001'") === '+14165550100', 'upgrade stores existing phone numbers in international form');
 ok(val("SELECT kyc_next_review FROM clients WHERE client_no='DX-TEST-0005'") === date('Y-m-d', strtotime('+30 days')), 'clients verified under the old one-click process get a KYC refresh within 30 days');
+ok((int)val("SELECT COUNT(*) FROM beneficiaries WHERE status='pending' AND account_hash IS NOT NULL") === 3 && val("SELECT account_hash FROM beneficiaries WHERE name='Synthetic Beneficiary'") === benef_account_hash('000999888777'), 'upgrade: existing beneficiaries wait for review and get a duplicate-check key');
 ok((string)val("SELECT COLUMN_TYPE FROM information_schema.COLUMNS WHERE TABLE_SCHEMA=DATABASE() AND TABLE_NAME='clients' AND COLUMN_NAME='kyc'") !== '' && str_contains((string)val("SELECT COLUMN_TYPE FROM information_schema.COLUMNS WHERE TABLE_SCHEMA=DATABASE() AND TABLE_NAME='clients' AND COLUMN_NAME='kyc'"), 'Escalated'), 'KYC states extended (information requested, escalated)');
 
 // ---- 0b. backup and restore ----
@@ -405,6 +408,71 @@ ok($thrown, 'a current code cannot be registered to a second agent');
 $ag2 = one('SELECT * FROM users WHERE id=?', [$agA['id']]);
 ok(agent_from_link((string)$agA['id'], '', agent_sig((int)$agA['id']))['id'] == $agA['id'] && agent_from_link((string)$agB['id'], '', agent_sig((int)$agA['id'])) === null, 'signed links use the internal ID and cannot be re-pointed to another agent');
 ok(str_contains(agent_link($ag2), 'a=' . $agA['id']) && agent_from_link('', 'SA-1001', ref_sig('SA-1001')) !== null, 'old SA-#### signed links keep working');
+
+
+// ---- 18. beneficiaries ----
+as_user($agA);
+$bc = insert_client(array_merge(array_fill_keys(CLIENT_FIELDS, ''), ['name' => 'Benef Sender', 'phone' => '+1 416 555 0401', 'office' => 'Canada', 'dob' => '1985-05-05']), ['agent_id' => $agA['id'], 'source' => 'agent', 'kyc' => 'Verified']);
+$bc2 = insert_client(array_merge(array_fill_keys(CLIENT_FIELDS, ''), ['name' => 'Other Sender', 'phone' => '+1 416 555 0402', 'office' => 'Canada']), ['agent_id' => $agB['id'], 'source' => 'agent']);
+[$b1, $e] = benef_add($bc, ['name' => 'Ravi Kumar', 'relation' => 'Brother', 'country' => 'India', 'bank' => 'SBI', 'account' => 'IN 1234-5678-90', 'phone' => '+91 98765 43210'], 'agent', (int)$agA['id']);
+$br = fn($id) => one('SELECT * FROM beneficiaries WHERE id=?', [$id]);
+ok($b1 && $br($b1)['status'] === 'pending' && str_starts_with((string)$br($b1)['account'], 'enc:v1:') && dec($br($b1)['account']) === 'IN 1234-5678-90', 'new beneficiary waits for review; account number stored encrypted');
+[$bx, $e] = benef_add($bc, ['name' => 'Ravi K', 'bank' => 'SBI', 'account' => 'in1234567890'], 'agent', (int)$agA['id']);
+ok(!$bx && str_contains(implode(' ', $e), 'already saved'), 'the same account twice for one client is refused (spaces, dashes and letter case ignored)');
+[$b2] = benef_add($bc2, ['name' => 'Ravi Kumar', 'bank' => 'SBI', 'account' => 'IN1234567890', 'country' => 'India'], 'agent', (int)$agB['id']);
+ok($b2 && (bool)array_filter(benef_flags($br($b2)), fn($f) => str_contains($f, 'other client')), 'the same account under another client is allowed but flagged for the reviewer');
+[$bn, $e] = benef_add($bc, ['name' => 'X', 'account' => '12<script>'], 'agent', null);
+ok(!$bn && count($e) >= 2, 'bad name and account formats are refused');
+foreach (['agent' => $agA, 'admin' => $admin, 'auditor' => $aud, 'staff' => $staff] as $who => $usr) { [$rok] = benef_review($br($b1), $usr, ['decision' => 'approve', 'screening_ref' => 'S-1', 'verification' => BENEF_VERIFY_METHODS[0], 'notes' => 'Checked with the client.']); ok(!$rok && $br($b1)['status'] === 'pending', "$who cannot approve a beneficiary"); }
+[$rok, $re] = benef_review($br($b1), $comp, ['decision' => 'approve', 'notes' => 'Checked with the client.']);
+ok(!$rok && str_contains(implode(' ', $re), 'screening') && str_contains(implode(' ', $re), 'verified'), 'approval needs a screening reference and a verification method');
+[$rok] = benef_review($br($b1), $comp, ['decision' => 'approve', 'screening_ref' => 'SCREEN-B1', 'verification' => BENEF_VERIFY_METHODS[0], 'notes' => 'Confirmed by phone with the client.']);
+ok($rok && $br($b1)['status'] === 'active' && (int)$br($b1)['reviewed_by'] === (int)$comp['id'] && $br($b1)['screening_ref'] === 'SCREEN-B1', 'compliance approves: active, reviewer and screening recorded');
+[$rok] = benef_review($br($b1), $super, ['decision' => 'reject', 'notes' => 'Second decision attempt.']);
+ok(!$rok, 'a decided beneficiary cannot be decided again');
+ok(benef_usable($br($b1), $bc)[0] && !benef_usable($br($b1), $bc2)[0] && !benef_usable($br($b2), $bc2)[0], 'only an approved beneficiary of the same client can receive a transfer');
+benef_update($br($b1), ['name' => 'Ravi Kumar', 'relation' => 'Brother', 'country' => 'India', 'bank' => 'SBI', 'account' => '', 'phone' => '+91 90000 00000'], (int)$agA['id']);
+ok($br($b1)['status'] === 'active' && dec($br($b1)['account']) === 'IN 1234-5678-90', 'changing only the phone keeps it approved; empty account keeps the number on file');
+benef_update($br($b1), ['name' => 'Ravi Kumar', 'relation' => 'Brother', 'country' => 'India', 'bank' => 'HDFC', 'account' => 'IN99887766', 'phone' => '+91 90000 00000'], (int)$agA['id']);
+ok($br($b1)['status'] === 'pending' && !benef_usable($br($b1), $bc)[0], 'changing bank or account sends it back to review and blocks transfers');
+$evs = all('SELECT * FROM beneficiary_events WHERE beneficiary_id=? ORDER BY id', [$b1]);
+ok(count($evs) === 4 && $evs[3]['fields'] === 'bank,account' && !preg_match('/9988|1234/', json_encode($evs)) && !preg_match('/9988|1234/', (string)val("SELECT GROUP_CONCAT(detail) FROM audit WHERE action LIKE 'beneficiary_%'")), 'history records each step and which fields changed, never the account numbers');
+benef_deactivate($br($b1), 'No longer used', (int)$agA['id']);
+[$uok] = benef_update($br($b1), ['name' => 'Ravi Kumar', 'bank' => 'SBI', 'account' => 'IN1'], (int)$agA['id']);
+ok($br($b1)['status'] === 'deactivated' && !$uok && !benef_usable($br($b1), $bc)[0], 'deactivated beneficiary is kept, cannot be edited back, cannot receive money');
+[$b3] = benef_add($bc, ['name' => 'Ravi Kumar', 'bank' => 'HDFC', 'account' => 'IN99887766'], 'agent', null);
+ok((bool)$b3, 'after deactivation the same person can be added again (and is reviewed again)');
+set_setting('benef_max_per_client', '2'); benef_add($bc, ['name' => 'Second Person', 'bank' => 'B', 'account' => 'AC0002'], 'agent', null);
+[$b5, $e] = benef_add($bc, ['name' => 'Third Person', 'bank' => 'B', 'account' => 'AC0003'], 'agent', null);
+ok(!$b5 && str_contains(implode(' ', $e), 'at most 2'), 'limit on active beneficiaries per client');
+set_setting('benef_max_per_client', '10');
+set_setting('benef_high_risk_countries', 'Atlantis, Elbonia');
+[$b6] = benef_add($bc, ['name' => 'Far Person', 'country' => 'Elbonia', 'bank' => 'EB', 'account' => 'EL555555'], 'agent', null);
+ok((bool)array_filter(benef_flags($br($b6)), fn($f) => str_contains($f, 'high-risk')), 'beneficiary in a high-risk country is flagged');
+$errs = save_beneficiaries($bc2, [['name' => 'Mum', 'bank' => 'B1', 'account' => 'M0001'], ['name' => 'Dad', 'bank' => 'B2', 'account' => 'D0002'], ['name' => 'Sis', 'country' => 'India']], 'online', null);
+ok(!$errs && (int)val("SELECT COUNT(*) FROM beneficiaries WHERE client_id=? AND status='pending'", [$bc2]) === 4, 'several beneficiaries from one registration are all saved for review');
+
+// ---- 19. one-time codes for client self-service ----
+q("UPDATE clients SET email=NULL WHERE id=?", [$bc]);
+[$sent, $msg] = otp_send(one('SELECT * FROM clients WHERE id=?', [$bc]), 'returning');
+ok(!$sent && str_contains($msg, 'no verified'), 'no email (or SMS) on file: no code, the client is sent to staff');
+q("UPDATE clients SET email='otp.synthetic@example.com' WHERE id=?", [$bc]);
+$ocl = one('SELECT * FROM clients WHERE id=?', [$bc]);
+[$sent, $msg] = otp_send($ocl, 'returning');
+ok($sent && str_contains($msg, 'o•') && !str_contains($msg, 'otp.synthetic@'), 'code sent; the message shows a masked address only');
+$setCode = fn($c) => q('UPDATE client_otps SET code_hash=? WHERE client_id=? AND purpose=? AND used_at IS NULL', [otp_hash($bc, 'returning', $c), $bc, 'returning']);
+$setCode('482913');
+ok(strlen((string)val('SELECT code_hash FROM client_otps WHERE client_id=? ORDER BY id DESC', [$bc])) === 64 && !str_contains(json_encode(all('SELECT * FROM client_otps')), '482913'), 'codes are stored only as a keyed hash');
+ok(!otp_verify($bc, 'upload', '482913'), 'a code works only for its own purpose');
+ok(otp_verify($bc, 'returning', '482 913') && !otp_verify($bc, 'returning', '482913'), 'right code works once (spaces ignored), never twice');
+otp_send($ocl, 'returning'); $setCode('111222');
+for ($i = 0; $i < 5; $i++) otp_verify($bc, 'returning', '000000');
+ok(!otp_verify($bc, 'returning', '111222'), 'after 5 wrong tries the code stops working');
+[$s3] = otp_send($ocl, 'returning'); [$s4] = otp_send($ocl, 'returning');
+ok(!$s4, 'at most 3 codes per hour for one client');
+q('DELETE FROM client_otps WHERE client_id=?', [$bc]); otp_send($ocl, 'upload'); q('UPDATE client_otps SET code_hash=?, expires_at=DATE_SUB(NOW(), INTERVAL 1 MINUTE) WHERE client_id=?', [otp_hash($bc, 'upload', '333444'), $bc]);
+ok(!otp_verify($bc, 'upload', '333444'), 'an expired code is refused');
+ok(otp_channels(['email' => 'x@example.com', 'phone_e164' => '+14165550000'] + $ocl) === ['email' => otp_mask_email('x@example.com')], 'SMS is not offered while no SMS provider is connected');
 
 $summary = sprintf("%s  %d passed, %d failed\n", date('Y-m-d H:i:s'), $pass, $fail);
 $report = $summary . implode("\n", $out) . "\n";

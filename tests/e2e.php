@@ -72,7 +72,7 @@ function e2e_cleanup(): void {
     q("DELETE FROM users WHERE username IN ('e2e.legacy','e2e.staffx','e2e.v2owner')"); q('DELETE FROM login_attempts');
     $ids = array_column(all("SELECT id FROM clients WHERE name LIKE 'E2E %'"), 'id');
     if ($ids) { $in = implode(',', array_map('intval', $ids));
-        foreach (['document_versions', 'client_documents', 'kyc_reviews', 'rekyc_cases', 'reminders', 'upload_requests', 'beneficiaries'] as $t) q("DELETE FROM $t WHERE client_id IN ($in)");
+        foreach (['document_versions', 'client_documents', 'kyc_reviews', 'rekyc_cases', 'reminders', 'upload_requests', 'beneficiaries', 'beneficiary_events', 'client_otps'] as $t) q("DELETE FROM $t WHERE client_id IN ($in)");
         q("DELETE FROM transfers WHERE client_id IN ($in)"); q("DELETE FROM clients WHERE id IN ($in)"); }
     q("DELETE FROM submissions WHERE name LIKE 'E2E %'"); q("DELETE FROM intake_drafts WHERE ip IS NOT NULL AND created_at > (NOW() - INTERVAL 1 DAY)");
     q("UPDATE users SET role='admin' WHERE username='test.admin'");
@@ -395,6 +395,89 @@ $ag12->post("/?p=client_form&id=$kc", ['name' => 'E2E KYC Person Changed', 'phon
 ok(val('SELECT kyc FROM clients WHERE id=?', [$kc]) === 'Pending', 'a sub-agent changing the name of a verified client sends it back to KYC review');
 q("UPDATE users SET username='test.agent1' WHERE id=?", [$a1['id']]); q("UPDATE agent_codes SET is_current=IF(code='test.agent1',1,0) WHERE agent_id=?", [$a1['id']]); q("DELETE FROM agent_codes WHERE code='test.agent1x'");
 q("UPDATE users SET role='admin' WHERE username='test.admin'");
+
+// ---- 13. beneficiaries, one identity per sender, one-time codes ----
+require_once __DIR__ . '/../inc/beneficiary.php'; require_once __DIR__ . '/../inc/otp.php';
+$fnB = date('Ymd') . '_' . bin2hex(random_bytes(12)) . '.jpg'; id_file_write($fnB, (string)file_get_contents($img)); $E2E_FILES[] = $fnB;
+$vc13 = insert_client(array_merge(array_fill_keys(CLIENT_FIELDS, ''), ['name' => 'E2E Sender Verified', 'phone' => '+1 416 555 7030', 'office' => 'Canada', 'dob' => '1979-09-09', 'country' => 'Canada',
+    'id_type' => 'Passport', 'id_number' => 'E2ESEND1', 'id_expiry' => date('Y-m-d', strtotime('+3 years')), 'id_has_address' => 'no']), ['agent_id' => $a1['id'], 'source' => 'agent', 'id_file' => $fnB]);
+q("UPDATE clients SET kyc='Verified', phone_e164='+14165557030' WHERE id=?", [$vc13]); q("UPDATE document_versions SET outcome='verified' WHERE client_id=?", [$vc13]);
+$oc13 = insert_client(array_merge(array_fill_keys(CLIENT_FIELDS, ''), ['name' => 'E2E Other Agent Client', 'phone' => '+1 416 555 7031', 'office' => 'Canada']), ['agent_id' => $a2['id'], 'source' => 'agent']);
+$ag13 = new Browser(); $ag13->login('test.agent1');
+$ag13->post("/?p=beneficiary&client=$vc13", ['act' => 'add', 'name' => 'E2E Benef One', 'relation' => 'Mother', 'country' => 'India', 'bank' => 'SBI', 'account' => 'E2E-ACC-0001']);
+$eb1 = one("SELECT * FROM beneficiaries WHERE client_id=? AND name='E2E Benef One'", [$vc13]);
+ok($eb1 && $eb1['status'] === 'pending' && str_contains($ag13->body, 'Waiting for review'), 'sub-agent adds a beneficiary for their client; it waits for review');
+$ag13->post("/?p=beneficiary&client=$vc13", ['act' => 'add', 'name' => 'E2E Benef Copy', 'bank' => 'SBI', 'account' => 'e2e acc 0001']);
+ok((int)val("SELECT COUNT(*) FROM beneficiaries WHERE client_id=?", [$vc13]) === 1 && str_contains($ag13->body, 'already saved'), 'the same account cannot be added twice');
+$ag13->post("/?p=beneficiary&client=$oc13", ['act' => 'add', 'name' => 'E2E Sneaky', 'bank' => 'X', 'account' => 'E2E-ACC-9999']);
+ok(!val("SELECT 1 FROM beneficiaries WHERE client_id=?", [$oc13]), "sub-agent cannot add a beneficiary to another agent's client");
+$ag13->post("/?p=beneficiary&client=$vc13&id=" . $eb1['id'], ['act' => 'review', 'decision' => 'approve', 'screening_ref' => 'X', 'verification' => BENEF_VERIFY_METHODS[0], 'notes' => 'Agent trying to approve.']);
+ok(val('SELECT status FROM beneficiaries WHERE id=?', [$eb1['id']]) === 'pending', 'sub-agent cannot approve beneficiaries');
+$ag13->post('/?p=transfer_form', ['client_id' => $vc13, 'transfer_date' => date('Y-m-d'), 'send_amount' => '100', 'send_currency' => 'CAD', 'receive_currency' => 'INR', 'beneficiary_id' => $eb1['id']]);
+ok(!val("SELECT 1 FROM transfers WHERE client_id=?", [$vc13]) && stripos($ag13->body, 'waiting for review') !== false, 'no transfer to a beneficiary that is still waiting for review');
+$co13 = new Browser(); fresh_step_wait(); $co13->login('test.compliance');
+$co13->req('/?p=compliance&v=benef'); ok(str_contains($co13->body, 'E2E Benef One'), 'beneficiary appears in the Compliance Center review list');
+$co13->post("/?p=beneficiary&client=$vc13&id=" . $eb1['id'], ['act' => 'review', 'decision' => 'approve', 'notes' => 'Checked with the client.']);
+ok(val('SELECT status FROM beneficiaries WHERE id=?', [$eb1['id']]) === 'pending' && str_contains($co13->body, 'screening'), 'approval without a screening reference is refused');
+$co13->post("/?p=beneficiary&client=$vc13&id=" . $eb1['id'], ['act' => 'review', 'decision' => 'approve', 'screening_ref' => 'E2E-SCR-77', 'verification' => BENEF_VERIFY_METHODS[0], 'notes' => 'Confirmed by phone with the client.']);
+ok(val('SELECT status FROM beneficiaries WHERE id=?', [$eb1['id']]) === 'active', 'compliance approves the beneficiary');
+snap('beneficiary', $co13->body);
+$ag13->req('/?p=transfer_form&client=' . $vc13); ok(str_contains($ag13->body, 'E2E Benef One') && str_contains($ag13->body, 'name="beneficiary_id"'), 'transfer form offers only approved beneficiaries');
+$ag13->post('/?p=transfer_form', ['client_id' => $vc13, 'transfer_date' => date('Y-m-d'), 'send_amount' => '100', 'send_currency' => 'CAD', 'receive_currency' => 'INR', 'beneficiary_id' => $eb1['id']]);
+$tr13 = one('SELECT * FROM transfers WHERE client_id=?', [$vc13]);
+ok($tr13 && (int)$tr13['beneficiary_id'] === (int)$eb1['id'] && !str_contains((string)$tr13['beneficiary'], 'E2E-ACC-0001'), 'transfer request names the beneficiary (account masked in the transfer record)');
+q("INSERT INTO beneficiaries (client_id, name, status) VALUES (?, 'E2E Foreign Benef', 'active')", [$oc13]); $foreign = (int)db()->lastInsertId();
+$ag13->post('/?p=transfer_form', ['client_id' => $vc13, 'transfer_date' => date('Y-m-d'), 'send_amount' => '100', 'send_currency' => 'CAD', 'receive_currency' => 'INR', 'beneficiary_id' => $foreign]);
+ok((int)val('SELECT COUNT(*) FROM transfers WHERE client_id=?', [$vc13]) === 1, "a beneficiary of another client cannot be used by changing the id");
+$ag13->post("/?p=beneficiary&client=$vc13&id=" . $eb1['id'], ['act' => 'edit', 'name' => 'E2E Benef One', 'relation' => 'Mother', 'country' => 'India', 'bank' => 'HDFC', 'account' => 'E2E-ACC-0002']);
+ok(val('SELECT status FROM beneficiaries WHERE id=?', [$eb1['id']]) === 'pending', 'changing the bank account sends the beneficiary back to review');
+$sa13 = new Browser(); q("UPDATE users SET role='super_admin' WHERE username='test.admin'"); fresh_step_wait(); $sa13->login('test.admin');
+$sa13->post('/?p=transfers', ['id' => $tr13['id'], 'act' => 'accept']);
+ok(val('SELECT status FROM transfers WHERE id=?', [$tr13['id']]) === 'pending', 'a pending transfer cannot be accepted after its beneficiary changed (re-checked at acceptance)');
+$sa13->post("/?p=beneficiary&client=$vc13&id=" . $eb1['id'], ['act' => 'deactivate', 'reason' => 'E2E: client asked to remove']);
+ok(val('SELECT status FROM beneficiaries WHERE id=?', [$eb1['id']]) === 'deactivated' && (int)val('SELECT COUNT(*) FROM beneficiary_events WHERE beneficiary_id=?', [$eb1['id']]) === 4, 'beneficiary deactivated with a reason; full history kept (added, approved, edited, deactivated)');
+q("UPDATE users SET role='admin' WHERE username='test.admin'");
+// several beneficiaries at registration
+$pf13 = new Browser(); $pf13->req('/register');
+$pf13->req('/register', ['csrf' => $pf13->csrf(), 'name' => 'E2E Multi Benef', 'country' => 'Canada', 'phone' => '416 555 7032', 'consent' => '1',
+    'b_name' => ['E2E Mum', 'E2E Dad', 'E2E Sister'], 'b_country' => ['India', 'India', 'Canada'], 'b_bank' => ['SBI', 'PNB', ''], 'b_account' => ['M-1001', 'D-2002', ''], 'b_relation' => ['Mother', 'Father', 'Sister'], 'b_phone' => ['', '', '']]);
+$ms = one("SELECT * FROM submissions WHERE name='E2E Multi Benef' ORDER BY id DESC");
+ok($ms && count(json_decode((string)dec($ms['data']), true)['beneficiaries'] ?? []) === 3, 'public form takes several beneficiaries at registration');
+$st13 = new Browser(); $st13->login('test.staff');
+$st13->post('/?p=submissions', ['id' => $ms['id'], 'act' => 'approve', 'agent_id' => '']);
+$mc = (int)val('SELECT client_id FROM submissions WHERE id=?', [$ms['id']]);
+ok($mc && (int)val("SELECT COUNT(*) FROM beneficiaries WHERE client_id=? AND status='pending'", [$mc]) === 3, 'approved registration: client created with all 3 beneficiaries waiting for review');
+// one identity per sender
+$ag13->post('/?p=client_form', ['name' => 'E2E Same ID Person', 'phone' => '+1 416 555 7033', 'country' => 'Canada', 'office' => 'Canada', 'id_type' => 'Passport', 'id_number' => 'E2ESEND1', 'consent' => '1', 'dupe_ok' => '1']);
+ok(!val("SELECT 1 FROM clients WHERE name='E2E Same ID Person'") && str_contains($ag13->body, 'already belongs to another client'), 'a second client with the same ID number is refused: every sender keeps their own KYC identity');
+// one-time code for returning clients
+q("UPDATE clients SET email=NULL WHERE id=?", [$vc13]);
+$rt = new Browser(); $rt->req('/register?returning=1');
+$cno13 = (string)val('SELECT client_no FROM clients WHERE id=?', [$vc13]);
+$rt->req('/register', ['csrf' => $rt->csrf(), 'act' => 'returning', 'client_no' => $cno13, 'dob' => '1979-09-09', 'last4' => '7030']);
+ok(str_contains($rt->body, 'no verified email') && !str_contains($rt->body, 'Welcome back'), 'returning client without a verified email or phone cannot self-serve (sent to staff)');
+q("UPDATE clients SET email='admin@dhanxfer.com' WHERE id=?", [$vc13]);
+$rt->req('/register', ['csrf' => $rt->csrf(), 'act' => 'returning', 'client_no' => $cno13, 'dob' => '1979-09-09', 'last4' => '7030']);
+ok(str_contains($rt->body, 'Enter your code') && str_contains($rt->body, 'a•') && !str_contains($rt->body, 'admin@dhanxfer.com'), 'after the identity check a one-time code is emailed (address shown masked)');
+snap('otp', $rt->body);
+q('UPDATE client_otps SET code_hash=? WHERE client_id=? AND used_at IS NULL', [otp_hash($vc13, 'returning', '246810'), $vc13]); // the code the client reads in the email
+$rt->req('/register', ['csrf' => $rt->csrf(), 'act' => 'returning_otp', 'code' => '135791']);
+ok(str_contains($rt->body, 'did not work') && !str_contains($rt->body, 'Welcome back'), 'wrong code refused');
+$rt->req('/register', ['csrf' => $rt->csrf(), 'act' => 'returning_otp', 'code' => '246810']);
+ok(str_contains($rt->body, 'Welcome back'), 'right code: the client can send their update');
+$rt->req('/register', ['csrf' => $rt->csrf(), 'act' => 'returning_update', 'changes' => ['beneficiary'], 'b_name' => ['E2E New Cousin', 'E2E New Uncle'], 'b_bank' => ['ICICI', 'BOB'], 'b_account' => ['C-3003', 'U-4004'], 'b_country' => ['India', 'India'], 'b_relation' => ['', ''], 'b_phone' => ['', ''], 'consent' => '1']);
+$ru = one('SELECT * FROM submissions WHERE client_id_returning=? ORDER BY id DESC', [$vc13]);
+$st13->post('/?p=submissions', ['id' => $ru['id'] ?? 0, 'act' => 'approve']);
+ok((int)val("SELECT COUNT(*) FROM beneficiaries WHERE client_id=? AND status='pending' AND name LIKE 'E2E New %'", [$vc13]) === 2, 'returning client adds two beneficiaries; after staff approval both wait for compliance review');
+// upload link now also asks for a code when an email is on file
+$co13->post("/?p=client&id=$vc13", ['act' => 'upload_link']);
+preg_match('#/upload\?t=([a-f0-9]{48})#', $co13->body, $um13);
+$up13 = new Browser(); $up13->req('/upload?t=' . ($um13[1] ?? 'x'));
+$up13->req('/upload', ['csrf' => $up13->csrf(), 'act' => 'verify', 't' => $um13[1] ?? '', 'dob' => '1979-09-09', 'last4' => '7030']);
+ok(str_contains($up13->body, 'Enter your code') && !str_contains($up13->body, 'Upload your current ID'), 'upload link: with an email on file, a one-time code is needed before the upload form');
+q('UPDATE client_otps SET code_hash=? WHERE client_id=? AND purpose=? AND used_at IS NULL', [otp_hash($vc13, 'upload', '975310'), $vc13, 'upload']);
+$up13->req('/upload', ['csrf' => $up13->csrf(), 'act' => 'otp', 't' => $um13[1] ?? '', 'code' => '975310']);
+ok(str_contains($up13->body, 'Upload your current ID'), 'right code opens the upload form');
 // ---- 10. phone-size layout snapshots (synthetic staging data) ----
 $m1 = new Browser(); $m1->login('test.agent1');
 foreach (['agent_home' => '/', 'agent_clients' => '/?p=clients', 'agent_new_client' => '/?p=client_form', 'agent_rates' => '/?p=rates', 'agent_transfers' => '/?p=transfers', 'agent_commission' => '/?p=commission', 'agent_transfer_new' => '/?p=transfer_form'] as $k => $pth) { $m1->req($pth); snap($k, $m1->body); }
@@ -409,7 +492,7 @@ foreach ($SNAP as $k => $h) {
 }
 @file_put_contents(data_dir() . '/snapshots.txt', $bundle);
 $lite = '';
-foreach (['agent_new_client', 'register_new', 'compliance_center', 'kyc_review', 'returning'] as $k) {
+foreach (['beneficiary', 'otp', 'register_new'] as $k) {
     if (!isset($SNAP[$k])) continue;
     $h = preg_replace('/name="csrf" value="[a-f0-9]+"/', 'name="csrf" value="x"', $SNAP[$k]);
     $h = preg_replace('#<head>.*?</head>#s', '<!--HEAD-->', $h);

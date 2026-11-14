@@ -2,6 +2,7 @@
 require __DIR__ . '/inc/bootstrap.php';
 require __DIR__ . '/inc/layout.php';
 require __DIR__ . '/inc/clientform.php';
+require __DIR__ . '/inc/otp.php';
 
 /*
  * Public client registration.
@@ -41,7 +42,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
         else {
             $keep = [];
             foreach (array_merge(CLIENT_FIELDS, ['wa_same', 'id_has_address', 'id_addr_same', 'id_addr_line1', 'id_addr_city', 'id_addr_postal', 'purpose_other', 'address_source', 'ref_code']) as $k) $keep[$k] = mb_substr(post($k), 0, $k === 'notes' ? 4000 : 250);
-            foreach (['b_name', 'b_relation', 'b_country', 'b_bank', 'b_account', 'b_phone'] as $k) $keep[$k] = is_array($_POST[$k] ?? null) ? array_map(fn($x) => mb_substr((string)$x, 0, 160), array_slice($_POST[$k], 0, 1)) : [];
+            foreach (['b_name', 'b_relation', 'b_country', 'b_bank', 'b_account', 'b_phone'] as $k) $keep[$k] = is_array($_POST[$k] ?? null) ? array_map(fn($x) => mb_substr((string)$x, 0, 160), array_slice($_POST[$k], 0, 5)) : [];
             $tok = bin2hex(random_bytes(24));
             q('INSERT INTO intake_drafts (token_hash, data, phone_last4_hash, agent_id, ip, expires_at) VALUES (?,?,?,?,?,DATE_ADD(NOW(), INTERVAL 7 DAY))',
               [hash('sha256', $tok), enc(json_encode($keep, JSON_UNESCAPED_UNICODE)), $draftKey($tok, $last4), $agent['id'] ?? null, $ip]);
@@ -60,7 +61,8 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
         } else {
             $data = json_decode((string)dec($d['data']), true) ?: [];
             $v = array_merge($v, $data);
-            $benefs = [['name' => $data['b_name'][0] ?? '', 'relation' => $data['b_relation'][0] ?? '', 'country' => $data['b_country'][0] ?? '', 'bank' => $data['b_bank'][0] ?? '', 'account' => $data['b_account'][0] ?? '', 'phone' => $data['b_phone'][0] ?? '']];
+            $benefs = [];
+            foreach (($data['b_name'] ?? []) as $i => $bn) { if (trim((string)$bn) === '') continue; $row = []; foreach (BENEF_FIELDS as $k) $row[$k] = (string)($data['b_' . $k][$i] ?? ''); $benefs[] = $row; }
             if ($d['agent_id'] && !$agent) { $_SESSION['ref_agent'] = (int)$d['agent_id']; $agent = one("SELECT id, username, name FROM users WHERE id=? AND role='agent' AND active=1", [$d['agent_id']]); }
             $v['ref_label'] = $agent['username'] ?? '';
             $_SESSION['draft_tok'] = $tok;
@@ -78,9 +80,11 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
             $digits = $c ? preg_replace('/\D/', '', (string)($c['phone_e164'] ?: $c['phone'])) : '';
             $last4 = preg_replace('/\D/', '', post('last4'));
             if ($c && $c['dob'] && valid_date(post('dob')) === $c['dob'] && strlen($last4) === 4 && hash_equals(substr($digits, -4), $last4)) {
+                // second step: a one-time code to the email (or phone) already on the verified record
                 session_regenerate_id(true);
-                $_SESSION['returning'] = ['id' => (int)$c['id'], 'at' => time()];
-                $view = 'returning_form';
+                [$sent, $otpMsg] = otp_send($c, 'returning');
+                if ($sent) { $_SESSION['returning_pending'] = ['id' => (int)$c['id'], 'at' => time()]; $view = 'returning_otp'; }
+                else $errors[] = $otpMsg;
             } else {
                 q("INSERT INTO login_attempts (ip, username) VALUES (?, 'returning')", [$ip]);
                 if (!$clientLocked) { q('INSERT INTO login_attempts (ip, username) VALUES (?, ?)', [$ip, $ckey]);
@@ -88,6 +92,15 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                 $errors[] = 'We could not match those details. Check your client number (on your receipts), date of birth and phone digits.';
             }
         }
+    } elseif ($act === 'returning_otp' || $act === 'returning_resend') {
+        $pend = $_SESSION['returning_pending'] ?? null;
+        if (!$pend || time() - $pend['at'] > 900) { $errors[] = 'Your session ran out. Please confirm your details again.'; $view = 'returning'; }
+        elseif ($act === 'returning_resend') { [, $otpMsg] = otp_send(one('SELECT * FROM clients WHERE id=?', [$pend['id']]), 'returning'); $view = 'returning_otp'; }
+        elseif (otp_verify((int)$pend['id'], 'returning', post('code'))) {
+            unset($_SESSION['returning_pending']); session_regenerate_id(true);
+            $_SESSION['returning'] = ['id' => (int)$pend['id'], 'at' => time()];
+            $view = 'returning_form';
+        } else { $errors[] = 'That code did not work. Check the newest message, or ask for a new code.'; $view = 'returning_otp'; }
     } elseif ($act === 'returning_update') {
         $r = $_SESSION['returning'] ?? null;
         if (!$r || time() - $r['at'] > 900) { $errors[] = 'Your session ran out. Please confirm your details again.'; $view = 'returning'; }
@@ -97,7 +110,8 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
             $upd = ['changes' => $chg, 'consent' => post('consent') === '1'];
             foreach (['address', 'city', 'province', 'postal', 'phone', 'id_type', 'id_number', 'id_expiry', 'notes'] as $k) $upd[$k] = mb_substr(trim(post($k)), 0, 250);
             if (in_array('phone', $chg, true)) { $ph = phone_check($upd['phone'], phone_region($c['country'])); if (!$ph['ok']) $errors[] = 'Phone: ' . $ph['error']; else $upd['phone_e164'] = $ph['e164']; }
-            foreach (['b_name', 'b_country', 'b_bank', 'b_account'] as $k) $upd[$k] = mb_substr(trim((string)($_POST[$k][0] ?? '')), 0, 160);
+            $upd['beneficiaries'] = in_array('beneficiary', $chg, true) ? benef_from_post(5) : [];
+            if (in_array('beneficiary', $chg, true)) foreach ($upd['beneficiaries'] as $nb) { [, $be] = benef_clean($nb); foreach ($be as $x) $errors[] = $x; }
             if (!$chg) $errors[] = 'Tick what has changed.';
             if (!$upd['consent']) $errors[] = 'Please tick the consent box.';
             $file = null;
@@ -116,6 +130,8 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
         $errors[] = 'Too many forms were sent from this connection. Please try again in an hour, or contact us on WhatsApp.';
     } else {
         [$v, $benefs, $errors] = read_client_post();
+        $benefs = array_slice($benefs, 0, 5);
+        foreach ($benefs as $nb) { [, $be] = benef_clean($nb); foreach ($be as $x) $errors[] = 'Beneficiary ' . ($nb['name'] ?: '') . ': ' . $x; }
         $typed = mb_substr(trim(post('ref_code')), 0, 60);
         $v['ref_code'] = $agent ? $agent['username'] : $typed;
         $v['ref_label'] = $agent['username'] ?? '';
@@ -178,6 +194,16 @@ if ($done): ?>
       <button class="btn gold" style="width:100%">Continue</button></form>
     <p class="tag">New to DhanXfer? <a href="/register">Register here</a>.</p>
   </div>
+<?php elseif ($view === 'returning_otp'): $pc = one('SELECT * FROM clients WHERE id=?', [$_SESSION['returning_pending']['id'] ?? 0]); ?>
+  <div class="login card" style="max-width:460px">
+    <h1>Enter your code</h1>
+    <p class="tag" style="margin-top:0"><?= e($otpMsg ?? ('We sent a 6-digit code to ' . implode(' / ', $pc ? otp_channels($pc) : []) . '.')) ?> It works for 10 minutes.</p>
+    <?php foreach ($errors as $er): ?><div class="banner bad"><?= e($er) ?></div><?php endforeach; ?>
+    <form method="post"><?= csrf_field() ?><input type="hidden" name="act" value="returning_otp">
+      <div class="f" style="margin-bottom:14px"><label for="otp">6-digit code</label><input id="otp" name="code" required inputmode="numeric" autocomplete="one-time-code" maxlength="7" pattern="[0-9 ]{6,7}" style="font-size:22px;letter-spacing:.25em;text-align:center"></div>
+      <button class="btn gold" style="width:100%">Continue</button></form>
+    <form method="post" style="margin-top:10px"><?= csrf_field() ?><button class="btn ghost" name="act" value="returning_resend" style="width:100%">Send a new code</button></form>
+  </div>
 <?php elseif ($view === 'returning_form'): $c = one('SELECT * FROM clients WHERE id=?', [$_SESSION['returning']['id']]); $dv = doc_current((int)$c['id']); ?>
   <div class="card" style="max-width:620px;margin:0 auto">
     <h1>Welcome back, <?= e(explode(' ', $c['name'])[0]) ?></h1>
@@ -195,10 +221,11 @@ if ($done): ?>
         <div class="f" data-show-if="changes[]=id"><label for="rid_number">ID number</label><input id="rid_number" name="id_number" autocomplete="off"></div>
         <div class="f" data-show-if="changes[]=id"><label for="rid_expiry">Expiry date</label><input id="rid_expiry" name="id_expiry" type="date"></div>
         <div class="f wide" data-show-if="changes[]=id"><label for="rid_file">Photo of the new ID</label><input id="rid_file" name="id_file" type="file" accept="image/*,application/pdf" capture="environment"></div>
-        <div class="f" data-show-if="changes[]=beneficiary"><label for="rb_name">Their full name</label><input id="rb_name" name="b_name[]"></div>
-        <div class="f" data-show-if="changes[]=beneficiary"><label for="rb_country">Country</label><input id="rb_country" name="b_country[]"></div>
-        <div class="f" data-show-if="changes[]=beneficiary"><label for="rb_bank">Bank</label><input id="rb_bank" name="b_bank[]"></div>
-        <div class="f" data-show-if="changes[]=beneficiary"><label for="rb_account">Account / IBAN</label><input id="rb_account" name="b_account[]" autocomplete="off"></div>
+        <div class="f wide" data-show-if="changes[]=beneficiary"><div id="benefs"><div class="benef card" style="padding:12px;margin-bottom:8px"><div class="fields">
+          <div class="f"><label>Their full name</label><input name="b_name[]"></div><div class="f"><label>Relationship</label><input name="b_relation[]"></div>
+          <div class="f"><label>Country</label><input name="b_country[]"></div><div class="f"><label>Bank</label><input name="b_bank[]"></div>
+          <div class="f"><label>Account / IBAN</label><input name="b_account[]" autocomplete="off"></div><div class="f"><label>Phone</label><input name="b_phone[]" type="tel"></div></div></div></div>
+          <button type="button" class="btn sm" id="addBenef" data-max="5">+ Add another person</button><p class="tag">Each new person is checked by our team before money can be sent to them.</p></div>
         <div class="f wide"><label for="rnotes">Anything else?</label><textarea id="rnotes" name="notes"></textarea></div>
       </div>
       <label class="check" style="margin-top:12px"><input type="checkbox" name="consent" value="1" required><span>These details are correct and DhanXfer may store them. <span class="req">*</span></span></label>

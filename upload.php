@@ -4,18 +4,32 @@
 require __DIR__ . '/inc/bootstrap.php';
 require __DIR__ . '/inc/layout.php';
 require __DIR__ . '/inc/compliance.php';
+require __DIR__ . '/inc/otp.php';
 
 $tok = (string)(get('t') ?: post('t'));
 $r = upload_request_find($tok);
 $err = []; $done = false;
 $verified = $r && !empty($_SESSION['upload_ok'][$r['id']]) && $r['verified_at'];
+$client = $r ? one('SELECT * FROM clients WHERE id=?', [$r['client_id']]) : null;
+// with an email (or SMS) on file, a one-time code to it is needed too; otherwise the staff-sent link is the second factor
+$needOtp = $client && otp_channels($client);
+$otpOk = $r && !empty($_SESSION['upload_otp'][$r['id']]);
+$otpMsg = null;
 
 if ($r && $_SERVER['REQUEST_METHOD'] === 'POST') {
     csrf_check();
     if (post('act') === 'verify') {
-        if (upload_request_verify($r, post('dob'), preg_replace('/\D/', '', post('last4')))) { session_regenerate_id(true); $_SESSION['upload_ok'][$r['id']] = true; $verified = true; }
+        if (upload_request_verify($r, post('dob'), preg_replace('/\D/', '', post('last4')))) {
+            session_regenerate_id(true); $_SESSION['upload_ok'][$r['id']] = true; $verified = true;
+            if ($needOtp) { [$sent, $otpMsg] = otp_send($client, 'upload'); if (!$sent) $err[] = $otpMsg; }
+        }
         else { $err[] = 'Those details do not match our records.'; $r = upload_request_find($tok); }
-    } elseif (post('act') === 'upload' && $verified) {
+    } elseif (post('act') === 'otp' && $verified && $needOtp) {
+        if (otp_verify((int)$client['id'], 'upload', post('code'))) { $_SESSION['upload_otp'][$r['id']] = true; $otpOk = true; }
+        else $err[] = 'That code did not work. Check the newest message.';
+    } elseif (post('act') === 'otp_resend' && $verified && $needOtp) {
+        [, $otpMsg] = otp_send($client, 'upload');
+    } elseif (post('act') === 'upload' && $verified && (!$needOtp || $otpOk)) {
         $exp = valid_date(post('id_expiry'));
         if (!in_array(post('id_type'), ID_TYPES, true)) $err[] = 'Choose the ID type.';
         if (trim(post('id_number')) === '') $err[] = 'Enter the ID number.';
@@ -51,6 +65,13 @@ page_head('Upload your document', true); ?>
     <div class="f" style="margin-bottom:12px"><label for="dob">Date of birth</label><input id="dob" name="dob" type="date" required></div>
     <div class="f" style="margin-bottom:16px"><label for="last4">Last 4 digits of your phone number</label><input id="last4" name="last4" required inputmode="numeric" pattern="[0-9]{4}" maxlength="4" autocomplete="off"></div>
     <button class="btn gold" style="width:100%">Continue</button></form>
+<?php elseif ($needOtp && !$otpOk): ?>
+  <h1>Enter your code</h1><p class="tag" style="margin-top:0"><?= e($otpMsg ?? ('We sent a 6-digit code to ' . implode(' / ', otp_channels($client)) . '.')) ?> It works for 10 minutes.</p>
+  <?php foreach ($err as $x): ?><div class="banner bad"><?= e($x) ?></div><?php endforeach; ?>
+  <form method="post"><?= csrf_field() ?><input type="hidden" name="act" value="otp"><input type="hidden" name="t" value="<?= e($tok) ?>">
+    <div class="f" style="margin-bottom:14px"><label for="code">6-digit code</label><input id="code" name="code" required inputmode="numeric" autocomplete="one-time-code" maxlength="7" style="font-size:22px;letter-spacing:.25em;text-align:center"></div>
+    <button class="btn gold" style="width:100%">Continue</button></form>
+  <form method="post" style="margin-top:10px"><?= csrf_field() ?><input type="hidden" name="t" value="<?= e($tok) ?>"><button class="btn ghost" name="act" value="otp_resend" style="width:100%">Send a new code</button></form>
 <?php else: ?>
   <h1>Upload your current ID</h1>
   <?php foreach ($err as $x): ?><div class="banner bad"><?= e($x) ?></div><?php endforeach; ?>

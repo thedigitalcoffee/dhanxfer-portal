@@ -107,7 +107,12 @@
         fetch('/addr.php?q=' + encodeURIComponent(q) + '&country=' + encodeURIComponent(ctry ? ctry.value : ''), { headers: { 'X-CSRF': tokEl ? tokEl.value : '' }, credentials: 'same-origin' })
           .then(function (r) { return r.ok ? r.json() : []; }).then(function (rows) {
             list.innerHTML = '';
-            rows.forEach(function (a) { var b = document.createElement('button'); b.type = 'button'; b.textContent = a.label; b.addEventListener('click', function () { fill(a); }); list.appendChild(b); });
+            rows.forEach(function (a) { var b = document.createElement('button'); b.type = 'button'; b.textContent = a.label; b.addEventListener('click', function () {
+              if (a.line1) { fill(a); return; }
+              // two-step providers: fetch the full address for the picked suggestion
+              fetch('/addr.php?id=' + encodeURIComponent(a.id || ''), { headers: { 'X-CSRF': tokEl ? tokEl.value : '' }, credentials: 'same-origin' })
+                .then(function (r) { return r.ok ? r.json() : null; }).then(function (full) { if (full && full.line1) fill(full); else list.hidden = true; }).catch(function () { list.hidden = true; });
+            }); list.appendChild(b); });
             list.hidden = !rows.length;
           }).catch(function () { list.hidden = true; });
       }, 300);
@@ -126,6 +131,7 @@
     head.hidden = false; back.hidden = false; next.hidden = false;
     var labelFor = function (el) {
       var l = el.id && wf.querySelector('label[for="' + el.id + '"]');
+      if (!l) { var ff = el.closest('.f'); l = ff && ff.querySelector('label'); }
       if (l) return l.textContent.replace(/\*|\(.*?\)/g, '').trim();
       var f = el.closest('.f'); var s = f && f.querySelector('.lbl'); return s ? s.textContent.replace('*', '').trim() : el.name;
     };
@@ -185,8 +191,17 @@
   var addB = document.getElementById('addBenef');
   if (addB) addB.addEventListener('click', function () {
     var wrap = document.getElementById('benefs'), first = wrap.querySelector('.benef');
+    var max = parseInt(addB.getAttribute('data-max') || '10', 10);
+    if (wrap.querySelectorAll('.benef').length >= max) return;
     var c = first.cloneNode(true);
-    c.querySelectorAll('input').forEach(function (i) { i.value = ''; });
+    c.querySelectorAll('input').forEach(function (i) { i.value = ''; i.removeAttribute('id'); });
+    c.querySelectorAll('label').forEach(function (l) { l.removeAttribute('for'); });
+    c.querySelectorAll('.rm-benef').forEach(function (x) { x.remove(); });
+    var rm = document.createElement('button'); rm.type = 'button'; rm.className = 'btn sm ghost rm-benef'; rm.textContent = 'Remove this person';
+    rm.addEventListener('click', function () { c.remove(); addB.hidden = false; });
+    c.appendChild(rm);
     wrap.appendChild(c);
+    if (wrap.querySelectorAll('.benef').length >= max) addB.hidden = true;
+    var f = c.querySelector('input'); if (f) f.focus();
   });
 })();

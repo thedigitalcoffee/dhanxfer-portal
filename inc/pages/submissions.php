@@ -22,7 +22,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && post('act') !== 'reveal') {
         if (in_array('address', $chg, true) && trim($d['address'] ?? '') !== '') q("UPDATE clients SET address=?, city=?, province=?, postal=?, address_source='manual', updated_at=NOW() WHERE id=?", [$d['address'], $d['city'] ?: null, $d['province'] ?: null, $d['postal'] ?: null, $c['id']]);
         if (in_array('phone', $chg, true) && !empty($d['phone_e164'])) q('UPDATE clients SET phone=?, phone_e164=?, updated_at=NOW() WHERE id=?', [$d['phone'], $d['phone_e164'], $c['id']]);
         if (array_intersect(['address', 'phone'], $chg)) kyc_identity_changed((int)$c['id'], implode(', ', array_intersect(['address', 'phone'], $chg)), (int)$u['id']);
-        if (in_array('beneficiary', $chg, true) && trim($d['b_name'] ?? '') !== '') q('INSERT INTO beneficiaries (client_id,name,country,bank,account) VALUES (?,?,?,?,?)', [$c['id'], $d['b_name'], $d['b_country'] ?: null, $d['b_bank'] ?: null, enc($d['b_account'] ?: null)]);
+        if (in_array('beneficiary', $chg, true)) foreach ($d['beneficiaries'] ?? [] as $nb) { [, $be] = benef_add((int)$c['id'], $nb, 'online', (int)$u['id']); foreach ($be as $x) flash('Beneficiary not added: ' . $x, 'warn'); }
         if (in_array('id', $chg, true) || in_array('address', $chg, true)) {
             if (in_array('id', $chg, true)) client_save_document((int)$c['id'], ['id_type' => $d['id_type'] ?? '', 'id_number' => $d['id_number'] ?? '', 'id_expiry' => valid_date($d['id_expiry'] ?? '') ?? '', 'id_country' => $c['id_country']], $s['id_file'], 'online', (int)$u['id']);
             else doc_sync_client((int)$c['id']);
@@ -38,10 +38,15 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && post('act') !== 'reveal') {
         $v = [];
         foreach (CLIENT_FIELDS as $k) $v[$k] = (string)($d[$k] ?? '');
         foreach (['phone_e164', 'phone_region', 'address_source', 'id_has_address', 'id_addr_same', 'id_addr_line1', 'id_addr_city', 'id_addr_postal'] as $k) $v[$k] = (string)($d[$k] ?? '');
+        if (trim($v['id_number']) !== '' && ($ex = one('SELECT id, client_no FROM clients WHERE id_number_hash=?', [id_hash($v['id_number'])]))) {
+            q("UPDATE submissions SET status='new', reviewed_by=NULL, reviewed_at=NULL WHERE id=?", [$s['id']]);
+            flash('This ID number already belongs to client ' . $ex['client_no'] . '. One identity per sender: update that client instead, or reject this form.', 'bad');
+            redirect('/?p=submissions&id=' . $s['id']);
+        }
         $agentId = (int)post('agent_id') ?: null;
         if ($agentId && !val("SELECT 1 FROM users WHERE id=? AND role='agent'", [$agentId])) $agentId = null;
         $cid = insert_client($v, ['kyc' => 'Pending', 'agent_id' => $agentId, 'source' => 'online', 'consent' => !empty($d['consent']), 'id_file' => $s['id_file'], 'created_by' => $u['id']]);
-        save_beneficiaries($cid, $d['beneficiaries'] ?? []);
+        foreach (save_beneficiaries($cid, $d['beneficiaries'] ?? [], 'online', (int)$u['id']) as $be) flash('Beneficiary not added: ' . $be, 'warn');
         q("UPDATE submissions SET status='approved', client_id=?, reviewed_by=?, reviewed_at=NOW() WHERE id=?", [$cid, $u['id'], $s['id']]);
         audit('approve_submission', 'client', $cid, (string)$s['app_ref']);
         flash($s['name'] . ' added as a client. KYC is Pending until you check their ID.');
@@ -57,7 +62,7 @@ if (get('id') !== '') {
     $s = one('SELECT s.*, r.name reviewer FROM submissions s LEFT JOIN users r ON r.id=s.reviewed_by WHERE s.id=?', [(int)get('id')]);
     if (!$s) { flash('Form not found.', 'bad'); redirect('/?p=submissions'); }
     $d = json_decode((string)dec($s['data']), true) ?: [];
-    if (isset($d['returning_update'])) { $ru = $d['returning_update']; $d = ['notes' => $ru['notes'] ?? '', 'consent' => $ru['consent'] ?? false, 'address' => $ru['address'] ?? '', 'city' => $ru['city'] ?? '', 'postal' => $ru['postal'] ?? '', 'phone' => $ru['phone'] ?? '', 'id_type' => $ru['id_type'] ?? '', 'id_number' => $ru['id_number'] ?? '', 'id_expiry' => $ru['id_expiry'] ?? '', 'purpose' => 'Returning client update: ' . implode(', ', $ru['changes'] ?? [])]; }
+    if (isset($d['returning_update'])) { $ru = $d['returning_update']; $d = ['notes' => $ru['notes'] ?? '', 'consent' => $ru['consent'] ?? false, 'address' => $ru['address'] ?? '', 'city' => $ru['city'] ?? '', 'postal' => $ru['postal'] ?? '', 'phone' => $ru['phone'] ?? '', 'id_type' => $ru['id_type'] ?? '', 'id_number' => $ru['id_number'] ?? '', 'id_expiry' => $ru['id_expiry'] ?? '', 'purpose' => 'Returning client update: ' . implode(', ', $ru['changes'] ?? []), 'beneficiaries' => $ru['beneficiaries'] ?? []]; }
     $reveal = can('pii.reveal') && $_SERVER['REQUEST_METHOD'] === 'POST' && post('act') === 'reveal';
     audit($reveal ? 'view_pii' : 'view_submission', 'submission', $s['id'], (string)$s['app_ref'] . ($reveal ? ' · full numbers shown' : ''));
     $digits = substr(preg_replace('/\D/', '', $s['phone']), -10);

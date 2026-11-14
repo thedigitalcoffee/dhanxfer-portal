@@ -22,6 +22,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
         $changes = [];
         foreach (array_keys(COMPLIANCE_DEFAULTS) as $k) {
             if (!isset($_POST[$k])) { if (str_starts_with($k, 'block_')) { $v = '0'; } else continue; }
+            elseif ($k === 'benef_high_risk_countries') $v = mb_substr(implode(', ', array_filter(array_map('trim', explode(',', post($k))))), 0, 1000);
             else $v = str_starts_with($k, 'block_') ? (post($k) === '1' ? '1' : '0') : (string)max(0, min(3650, (int)post($k)));
             if (setting($k) !== $v) { set_setting($k, $v); $changes[] = "$k=$v"; }
         }
@@ -37,7 +38,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
     }
     redirect('/?p=compliance&v=' . urlencode(get('v', 'pending')));
 }
-$views = ['pending' => 'Pending KYC', 'expiring' => 'Expiring soon', 'expired' => 'Expired documents', 'required' => 'KYC refresh required',
+$views = ['pending' => 'Pending KYC', 'benef' => 'Beneficiaries to review', 'expiring' => 'Expiring soon', 'expired' => 'Expired documents', 'required' => 'KYC refresh required',
           'progress' => 'KYC refresh in progress', 'completed' => 'Completed refresh', 'reminders' => 'Reminder history', 'policy' => 'Settings'];
 $v = array_key_exists(get('v'), $views) ? get('v') : 'pending';
 [$sw, $sp] = scope_where(me(), 'c');
@@ -49,6 +50,7 @@ $count = [
     'progress' => (int)val("SELECT COUNT(*) FROM rekyc_cases k JOIN clients c ON c.id=k.client_id WHERE $sw AND k.status='in_progress'", $sp),
     'completed' => (int)val("SELECT COUNT(*) FROM rekyc_cases k JOIN clients c ON c.id=k.client_id WHERE $sw AND k.status='completed'", $sp),
     'reminders' => (int)val("SELECT COUNT(*) FROM reminders r JOIN clients c ON c.id=r.client_id WHERE $sw AND r.status<>'skipped'", $sp),
+    'benef' => (int)val("SELECT COUNT(*) FROM beneficiaries b JOIN clients c ON c.id=b.client_id WHERE $sw AND b.status='pending'", $sp),
 ];
 $docJoin = "JOIN client_documents d ON d.client_id=c.id AND d.doc_kind='identity' AND d.status='current' JOIN document_versions v ON v.id=d.current_version_id";
 $rows = match ($v) {
@@ -58,6 +60,7 @@ $rows = match ($v) {
     'required', 'progress', 'completed' => all("SELECT k.*, c.client_no, c.name, c.kyc, r.decided_at, u.name reviewer FROM rekyc_cases k JOIN clients c ON c.id=k.client_id LEFT JOIN kyc_reviews r ON r.id=k.closed_review_id LEFT JOIN users u ON u.id=r.reviewer_id WHERE $sw AND k.status IN (" .
         ['required' => "'required','escalated'", 'progress' => "'in_progress'", 'completed' => "'completed'"][$v] . ") ORDER BY " . ($v === 'completed' ? 'k.closed_at DESC' : "k.status='escalated' DESC, k.due_date") . " LIMIT 300", $sp),
     'reminders' => all("SELECT r.*, c.client_no, c.name, (SELECT COUNT(*) FROM notification_attempts n WHERE n.reminder_id=r.id) tries FROM reminders r JOIN clients c ON c.id=r.client_id WHERE $sw AND r.status<>'skipped' ORDER BY r.id DESC LIMIT 300", $sp),
+    'benef' => all("SELECT b.id, b.client_id, b.name, b.country, b.bank, b.created_at, b.source, c.client_no, c.name AS cname, c.kyc FROM beneficiaries b JOIN clients c ON c.id=b.client_id WHERE $sw AND b.status='pending' ORDER BY b.created_at LIMIT 300", $sp),
     default => [],
 };
 $reasons = ['doc_expiring' => 'ID expiring', 'doc_expired' => 'ID expired', 'periodic' => 'Periodic refresh', 'manual' => 'Requested by staff'];
@@ -78,6 +81,9 @@ page_head('Compliance Center'); ?>
     <div class="f"><label for="upload_link_days">Upload links work for (days)</label><input id="upload_link_days" name="upload_link_days" type="number" min="1" max="30" value="<?= e(setting('upload_link_days')) ?>"></div></div></fieldset>
   <fieldset <?= $manage ? '' : 'disabled' ?>><legend>Periodic KYC refresh (separate from ID expiry)</legend><div class="fields">
     <?php foreach (['low' => 'Low', 'medium' => 'Medium', 'high' => 'High'] as $k => $l): ?><div class="f"><label for="rm<?= $k ?>"><?= $l ?> risk: refresh every (months)</label><input id="rm<?= $k ?>" name="refresh_months_<?= $k ?>" type="number" min="1" max="120" value="<?= e(setting('refresh_months_' . $k)) ?>"></div><?php endforeach; ?></div></fieldset>
+  <fieldset <?= $manage ? '' : 'disabled' ?>><legend>Beneficiaries</legend><div class="fields">
+    <div class="f wide"><label for="benef_high_risk_countries">High-risk countries (flagged for the reviewer, comma separated)</label><input id="benef_high_risk_countries" name="benef_high_risk_countries" value="<?= e(setting('benef_high_risk_countries')) ?>"></div>
+    <div class="f"><label for="benef_max_per_client">Most active beneficiaries per client</label><input id="benef_max_per_client" name="benef_max_per_client" type="number" min="1" max="50" value="<?= e(setting('benef_max_per_client')) ?>"></div></div></fieldset>
   <fieldset <?= $manage ? '' : 'disabled' ?>><legend>When transfers are blocked</legend>
     <?php foreach (['block_unverified' => 'KYC not approved', 'block_expired_doc' => 'ID expired (after the grace days below)', 'block_rekyc_overdue' => 'KYC refresh overdue'] as $k => $l): ?><label class="check" style="margin:6px 0"><input type="checkbox" name="<?= $k ?>" value="1" <?= setting($k) === '1' ? 'checked' : '' ?>><span><?= e($l) ?></span></label><?php endforeach; ?>
     <div class="f" style="max-width:260px"><label for="expired_grace_days">Grace days after expiry</label><input id="expired_grace_days" name="expired_grace_days" type="number" min="0" max="90" value="<?= e(setting('expired_grace_days')) ?>"></div></fieldset>
@@ -94,6 +100,9 @@ page_head('Compliance Center'); ?>
 <?php elseif (in_array($v, ['required', 'progress', 'completed'], true)): ?>
   <thead><tr><th>Client</th><th>Reason</th><th>Status</th><th>Due</th><th><?= $v === 'completed' ? 'Completed' : 'Opened' ?></th></tr></thead><tbody>
   <?php foreach ($rows as $r): ?><tr><td><?= $open($r['client_id'], $r['name']) ?><div class="tag num"><?= e($r['client_no']) ?> · case #<?= (int)$r['id'] ?></div></td><td><?= e($reasons[$r['reason']] ?? $r['reason']) ?></td><td><?= $r['status'] === 'escalated' ? '<span class="pill p-bad">Escalated</span>' : '<span class="pill p-mute">' . e(str_replace('_', ' ', $r['status'])) . '</span>' ?></td><td class="num"><?= fdate($r['due_date']) ?></td><td class="num"><?= $v === 'completed' ? fdatetime($r['closed_at']) . ($r['reviewer'] ? '<div class="tag">' . e($r['reviewer']) . '</div>' : '') : fdate($r['opened_at']) ?></td></tr><?php endforeach; ?>
+<?php elseif ($v === 'benef'): ?>
+  <thead><tr><th>Beneficiary</th><th>Client</th><th>Country</th><th>Bank</th><th>Added</th></tr></thead><tbody>
+  <?php foreach ($rows as $r): ?><tr><td><a href="/?p=beneficiary&client=<?= (int)$r['client_id'] ?>&id=<?= (int)$r['id'] ?>"><?= e($r['name']) ?></a><div class="tag"><?= e($r['source']) ?></div></td><td><?= e($r['cname']) ?><div class="tag num"><?= e($r['client_no']) ?> · KYC <?= e($r['kyc']) ?></div></td><td><?= e($r['country']) ?></td><td><?= e($r['bank']) ?></td><td class="num"><?= fdate($r['created_at']) ?></td></tr><?php endforeach; ?>
 <?php elseif ($v === 'reminders'): ?>
   <thead><tr><th>Client</th><th>Event</th><th>Channel</th><th>Status</th><th class="r">Tries</th><th>Last result</th><th></th></tr></thead><tbody>
   <?php foreach ($rows as $r): ?><tr><td><?= $open($r['client_id'], $r['name']) ?><div class="tag num"><?= e($r['client_no']) ?></div></td><td><?= e($r['event_key'] === 'expiry' ? 'Expiry day' : str_replace('exp-', '', $r['event_key']) . ' days before') ?><div class="tag"><?= fdate($r['due_on']) ?></div></td><td><?= e($r['channel'] === 'staff' ? 'Staff alert' : 'Client email') ?></td>

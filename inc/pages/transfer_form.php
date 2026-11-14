@@ -15,7 +15,7 @@ $liveKey = pair_key($v['send_currency'], $v['receive_currency']);
 if (isset($live[$liveKey])) $v['rate'] = fmt_rate($live[$liveKey]['sell_rate']);
 
 if ($_SERVER['REQUEST_METHOD'] === 'POST') {
-    foreach (['client_id', 'transfer_date', 'send_amount', 'send_currency', 'rate', 'receive_amount', 'receive_currency', 'fee', 'payment_method', 'beneficiary', 'receipt_no', 'notes', 'status', 'office'] as $k) $v[$k] = mb_substr(post($k), 0, $k === 'notes' ? 2000 : 250);
+    foreach (['client_id', 'transfer_date', 'send_amount', 'send_currency', 'rate', 'receive_amount', 'receive_currency', 'fee', 'payment_method', 'beneficiary_id', 'receipt_no', 'notes', 'status', 'office'] as $k) $v[$k] = mb_substr(post($k), 0, $k === 'notes' ? 2000 : 250);
     $c = $byId[(int)$v['client_id']] ?? null;
     if (!$c) $errors[] = 'Choose a client from the list.' . ($isAdmin ? '' : ' You can only send for your own clients.');
     $date = valid_date($v['transfer_date']);
@@ -27,13 +27,19 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
     if (!in_array($v['receive_currency'], RECV_CUR, true)) $v['receive_currency'] = 'INR';
     $status = $canDecide && in_array($v['status'], ['pending', 'accepted', 'completed'], true) ? $v['status'] : 'pending';
     if ($c) { require_once __DIR__ . '/../kyc.php'; [$okElig, $why] = transfer_eligibility(one('SELECT * FROM clients WHERE id=?', [$c['id']])); if (!$okElig) $errors[] = 'Transfers are not allowed for this client yet: ' . implode(' ', $why); }
+    // the money goes to one approved beneficiary of this client
+    require_once __DIR__ . '/../beneficiary.php';
+    $bsel = $c ? one('SELECT * FROM beneficiaries WHERE id=?', [(int)$v['beneficiary_id']]) : null;
+    if ($c) { [$bOk, $bWhy] = benef_usable($bsel, (int)$c['id']); if (!$bOk) $errors[] = 'Beneficiary: ' . $bWhy; }
     if (!$errors) {
+        $v['beneficiary'] = $bsel['name'] . ($bsel['bank'] ? ' · ' . $bsel['bank'] : '') . ($bsel['account'] ? ' · ' . mask(dec($bsel['account'])) : '');
         $ref = new_transfer_no();
         q('INSERT INTO transfers (ref_no,client_id,client_name,agent_id,beneficiary,send_amount,send_currency,rate,receive_amount,receive_currency,fee,payment_method,office,transfer_date,status,receipt_no,notes,requested_by,decided_by,decided_at) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)', [
             $ref, $c['id'], $c['name'], $c['agent_id'], nz($v['beneficiary']), $amt, $v['send_currency'], $rate, $rec, $v['receive_currency'], $fee,
             in_array($v['payment_method'], PAY, true) ? $v['payment_method'] : null, $c['office'], $date, $status, nz($v['receipt_no']), nz($v['notes']),
             $u['id'], $status !== 'pending' ? $u['id'] : null, $status !== 'pending' ? date('Y-m-d H:i:s') : null]);
         $tid = (int)db()->lastInsertId();
+        q('UPDATE transfers SET beneficiary_id=? WHERE id=?', [$bsel['id'], $tid]);
         apply_commission($tid);
         audit('create_transfer', 'transfer', $tid, $ref . ' ' . $status);
         if (!$canDecide) notify('Transfer request ' . $ref . ' from ' . $u['name'], "{$u['name']} ({$u['ref_code']}) requested a transfer of " . money($amt, $v['send_currency']) . ".\n\nAccept or reject it in the portal: " . app_link("/?p=transfers&id=$tid"), 'transfer_request');
@@ -41,8 +47,12 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
         redirect('/?p=transfers&id=' . $tid);
     }
 }
-$benefList = [];
-if ($v['client_id'] && isset($byId[$v['client_id']])) foreach (all('SELECT name, relation, bank, account FROM beneficiaries WHERE client_id=?', [(int)$v['client_id']]) as $b) $benefList[] = trim($b['name'] . ($b['relation'] ? " ({$b['relation']})" : '') . ($b['bank'] ? " · {$b['bank']}" : '') . ($b['account'] ? ' · ' . (can('pii.reveal') ? dec($b['account']) : mask(dec($b['account']))) : ''));
+$benefList = []; $benefWait = 0;
+if ($v['client_id'] && isset($byId[$v['client_id']])) {
+    foreach (all("SELECT id, name, relation, bank, account FROM beneficiaries WHERE client_id=? AND status='active' ORDER BY name", [(int)$v['client_id']]) as $b)
+        $benefList[$b['id']] = trim($b['name'] . ($b['relation'] ? " ({$b['relation']})" : '') . ($b['bank'] ? " · {$b['bank']}" : '') . ($b['account'] ? ' · ' . mask(dec($b['account'])) : ''));
+    $benefWait = (int)val("SELECT COUNT(*) FROM beneficiaries WHERE client_id=? AND status='pending'", [(int)$v['client_id']]);
+}
 
 page_head($canDecide ? 'New transfer' : 'Request transfer'); ?>
 <div class="spread"><div><h1><?= $canDecide ? 'New transfer' : 'Request a transfer' ?></h1>
@@ -70,7 +80,8 @@ page_head($canDecide ? 'New transfer' : 'Request transfer'); ?>
     <div class="f"><label for="payment_method">Payment method</label><select id="payment_method" name="payment_method"><?= opts(PAY, $v['payment_method'] ?? '') ?></select></div>
   </div></fieldset>
   <fieldset><legend>Payout</legend><div class="fields">
-    <div class="f wide"><label for="beneficiary">Beneficiary</label><input id="beneficiary" name="beneficiary" list="benefList" value="<?= e($v['beneficiary'] ?? '') ?>" placeholder="Pick from the client's saved beneficiaries or type"><?= datalist('benefList', $benefList) ?></div>
+    <div class="f wide"><label for="beneficiary_id">Beneficiary <span class="req">*</span></label><select id="beneficiary_id" name="beneficiary_id" required><option value="">Choose an approved beneficiary…</option><?php foreach ($benefList as $bid => $bl): ?><option value="<?= (int)$bid ?>"<?= (string)($v['beneficiary_id'] ?? '') === (string)$bid ? ' selected' : '' ?>><?= e($bl) ?></option><?php endforeach; ?></select>
+      <div class="tag"><?= $v['client_id'] ? ($benefList ? '' : 'No approved beneficiary yet. ') . ($benefWait ? $benefWait . ' waiting for review. ' : '') . '<a href="/?p=beneficiary&client=' . (int)$v['client_id'] . '">Add a beneficiary</a>' : 'Choose the client first.' ?></div></div>
     <div class="f"><label for="receipt_no">Receipt / reference no.</label><input id="receipt_no" name="receipt_no" value="<?= e($v['receipt_no'] ?? '') ?>"></div>
     <div class="f wide"><label for="notes">Notes</label><textarea id="notes" name="notes"><?= e($v['notes'] ?? '') ?></textarea></div>
   </div></fieldset>

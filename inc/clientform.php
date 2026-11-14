@@ -1,6 +1,7 @@
 <?php
 defined('DX') or exit;
 require_once __DIR__ . '/kyc.php';
+require_once __DIR__ . '/beneficiary.php';
 
 /** Read and clean the client fields from POST. Returns [fields, beneficiaries, errors]. */
 function read_client_post(int $clientId = 0): array {
@@ -47,12 +48,12 @@ function read_client_post(int $clientId = 0): array {
     return [$v, $b, $err];
 }
 
-function save_beneficiaries(int $clientId, array $list): void {
-    q('DELETE FROM beneficiaries WHERE client_id=?', [$clientId]);
-    foreach ($list as $b) {
-        q('INSERT INTO beneficiaries (client_id,name,relation,country,bank,account,phone) VALUES (?,?,?,?,?,?,?)',
-            [$clientId, $b['name'], $b['relation'], $b['country'], $b['bank'], enc($b['account'] ?: null), $b['phone']]);
-    }
+/** Adds the beneficiaries from a new-client form. Each waits for review. Returns the problems (if any). */
+function save_beneficiaries(int $clientId, array $list, string $source = 'admin', ?int $by = null): array {
+    require_once __DIR__ . '/beneficiary.php';
+    $errs = [];
+    foreach ($list as $b) { [, $e] = benef_add($clientId, $b, $source, $by); foreach ($e as $x) $errs[] = ($b['name'] ?? '') . ': ' . $x; }
+    return $errs;
 }
 
 function nz($v) { return ($v === '' || $v === null) ? null : $v; }
@@ -163,6 +164,9 @@ function client_fields(array $v, array $benefs, string $mode, array $agents = []
     </fieldset>
     <fieldset>
       <legend><?= $mode === 'public' ? 'Who will you send money to? (optional)' : 'Beneficiaries' ?></legend>
+      <?php if (array_filter(array_column($benefs, 'id'))): ?>
+      <p class="tag" style="margin:0">Beneficiaries are added, changed, reviewed and deactivated on the client page (each change is reviewed and kept in the history).</p>
+      <?php else: ?>
       <div id="benefs">
       <?php foreach ($benefs ?: [[]] as $b): $bv = fn($k) => e($b[$k] ?? ''); ?>
         <div class="benef">
@@ -176,6 +180,7 @@ function client_fields(array $v, array $benefs, string $mode, array $agents = []
       <?php endforeach; ?>
       </div>
       <button type="button" class="btn sm" id="addBenef">+ Add another beneficiary</button>
+      <?php endif; ?>
     </fieldset>
     <fieldset>
       <legend><?= $mode === 'public' ? 'Confirm' : 'Notes & consent' ?></legend>
@@ -280,16 +285,23 @@ function client_wizard(array $v, array $benefs, string $mode): void {
       </div>
     </section>
 
-    <section class="step" data-title="<?= $pub ? 'Who will you send money to?' : 'Beneficiary' ?>" data-optional="1">
-      <p class="tag" style="margin-top:0">Optional. <?= $pub ? 'You can also tell us later.' : 'More beneficiaries can be added on the client page.' ?></p>
-      <div class="fields">
-        <div class="f"><label for="b_name0">Full name</label><input id="b_name0" name="b_name[]" value="<?= $bv('name') ?>"></div>
-        <div class="f"><label for="b_relation0">Relationship to <?= $you ?></label><input id="b_relation0" name="b_relation[]" value="<?= $bv('relation') ?>" placeholder="Mother, brother…"></div>
-        <div class="f"><label for="b_country0">Country</label><input id="b_country0" name="b_country[]" list="countries" value="<?= $bv('country') ?>"></div>
-        <div class="f"><label for="b_bank0">Bank name</label><input id="b_bank0" name="b_bank[]" value="<?= $bv('bank') ?>"></div>
-        <div class="f"><label for="b_account0">Account number / IBAN</label><input id="b_account0" name="b_account[]" value="<?= $bv('account') ?>" autocomplete="off"></div>
-        <div class="f"><label for="b_phone0">Phone</label><input id="b_phone0" name="b_phone[]" type="tel" value="<?= $bv('phone') ?>"></div>
+    <section class="step" data-title="<?= $pub ? 'Who will you send money to?' : 'Beneficiaries' ?>" data-optional="1">
+      <p class="tag" style="margin-top:0">Optional. Add everyone <?= $you ?> plan<?= $pub ? '' : 's' ?> to send to (up to 5). Each one is checked by our team before the first transfer.</p>
+      <div id="benefs">
+      <?php foreach ($benefs ?: [[]] as $bi => $b): $bv = fn($k) => e($b[$k] ?? ''); $sfx = $bi ? '' : '0'; ?>
+        <div class="benef card" style="padding:12px;margin-bottom:10px">
+          <div class="fields">
+            <div class="f"><label<?= $sfx !== '' ? ' for="b_name0"' : '' ?>>Full name</label><input<?= $sfx !== '' ? ' id="b_name0"' : '' ?> name="b_name[]" value="<?= $bv('name') ?>"></div>
+            <div class="f"><label<?= $sfx !== '' ? ' for="b_relation0"' : '' ?>>Relationship to <?= $you ?></label><input<?= $sfx !== '' ? ' id="b_relation0"' : '' ?> name="b_relation[]" value="<?= $bv('relation') ?>" placeholder="Mother, brother…"></div>
+            <div class="f"><label<?= $sfx !== '' ? ' for="b_country0"' : '' ?>>Country</label><input<?= $sfx !== '' ? ' id="b_country0"' : '' ?> name="b_country[]" list="countries" value="<?= $bv('country') ?>"></div>
+            <div class="f"><label<?= $sfx !== '' ? ' for="b_bank0"' : '' ?>>Bank name</label><input<?= $sfx !== '' ? ' id="b_bank0"' : '' ?> name="b_bank[]" value="<?= $bv('bank') ?>"></div>
+            <div class="f"><label<?= $sfx !== '' ? ' for="b_account0"' : '' ?>>Account number / IBAN</label><input<?= $sfx !== '' ? ' id="b_account0"' : '' ?> name="b_account[]" value="<?= $bv('account') ?>" autocomplete="off"></div>
+            <div class="f"><label<?= $sfx !== '' ? ' for="b_phone0"' : '' ?>>Phone</label><input<?= $sfx !== '' ? ' id="b_phone0"' : '' ?> name="b_phone[]" type="tel" value="<?= $bv('phone') ?>"></div>
+          </div>
+        </div>
+      <?php endforeach; ?>
       </div>
+      <button type="button" class="btn sm" id="addBenef" data-max="5">+ Add another person</button>
     </section>
 
     <section class="step" data-title="Check and send" data-review="1">

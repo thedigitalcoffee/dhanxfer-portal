@@ -79,7 +79,7 @@ function db(): PDO {
     return $pdo;
 }
 
-const SCHEMA_VERSION = '7';
+const SCHEMA_VERSION = '8';
 /** True when the database is at the version this code expects. */
 function schema_current(): bool {
     try { return (string)db()->query("SELECT v FROM settings WHERE k='schema_version'")->fetchColumn() === SCHEMA_VERSION; } catch (Throwable $e) { return false; }
@@ -120,7 +120,14 @@ function migrate_locked(?string $ver): void {
         ['clients', 'address_source', "VARCHAR(10) NULL"], ['clients', 'id_has_address', 'TINYINT(1) NULL'],
         ['clients', 'id_address_json', 'TEXT NULL'], ['clients', 'address_match', 'VARCHAR(20) NULL'],
         ['clients', 'kyc_reviewed_at', 'DATETIME NULL'], ['clients', 'kyc_reviewed_by', 'INT UNSIGNED NULL'],
-        ['clients', 'kyc_next_review', 'DATE NULL'], ['submissions', 'client_id_returning', 'INT UNSIGNED NULL']);
+        ['clients', 'kyc_next_review', 'DATE NULL'], ['submissions', 'client_id_returning', 'INT UNSIGNED NULL'],
+        // v8: beneficiaries are reviewed and never deleted once used; transfers point to one
+        ['beneficiaries', 'status', "VARCHAR(12) NOT NULL DEFAULT 'pending'"], ['beneficiaries', 'account_hash', 'CHAR(64) NULL'],
+        ['beneficiaries', 'screening_ref', 'VARCHAR(120) NULL'], ['beneficiaries', 'verification', 'VARCHAR(200) NULL'],
+        ['beneficiaries', 'reviewed_by', 'INT UNSIGNED NULL'], ['beneficiaries', 'reviewed_at', 'DATETIME NULL'],
+        ['beneficiaries', 'source', "VARCHAR(12) NULL"], ['beneficiaries', 'created_by', 'INT UNSIGNED NULL'],
+        ['beneficiaries', 'created_at', 'DATETIME NULL'], ['beneficiaries', 'updated_at', 'DATETIME NULL'],
+        ['transfers', 'beneficiary_id', 'INT UNSIGNED NULL']);
     foreach ($cols as [$t, $c, $def]) {
         if ($def === null) continue;
         $has = db()->prepare('SELECT 1 FROM information_schema.COLUMNS WHERE TABLE_SCHEMA=DATABASE() AND TABLE_NAME=? AND COLUMN_NAME=?');
@@ -161,6 +168,10 @@ function migrate_locked(?string $ver): void {
         foreach ([90, 60, 30, 7, 0] as $d) foreach (['email', 'staff'] as $ch) db()->prepare('INSERT IGNORE INTO reminder_rules (offset_days, channel) VALUES (?, ?)')->execute([$d, $ch]);
     }
     foreach (COMPLIANCE_DEFAULTS as $k => $v) db()->prepare('INSERT IGNORE INTO settings (k, v) VALUES (?, ?)')->execute([$k, $v]);
+    if (!(int)db()->query("SELECT COUNT(*) FROM role_permissions WHERE perm='beneficiaries.manage'")->fetchColumn()) {
+        $ins = db()->prepare('INSERT IGNORE INTO role_permissions (role, perm) VALUES (?, ?)');
+        foreach (['admin' => ['beneficiaries.manage'], 'staff' => ['beneficiaries.manage'], 'compliance' => ['beneficiaries.manage', 'beneficiaries.review']] as $role => $ps) foreach ($ps as $perm) $ins->execute([$role, $perm]);
+    }
     if (!(int)db()->query("SELECT COUNT(*) FROM role_permissions WHERE perm='compliance.view'")->fetchColumn()) {
         $ins = db()->prepare('INSERT IGNORE INTO role_permissions (role, perm) VALUES (?, ?)');
         foreach (['compliance' => ['compliance.view', 'compliance.manage'], 'admin' => ['compliance.view'], 'auditor' => ['compliance.view']] as $role => $ps) foreach ($ps as $perm) $ins->execute([$role, $perm]);
@@ -197,6 +208,9 @@ function migrate_locked(?string $ver): void {
         // v7: every client's ID moves into the document history; agents get their login ID as referral code
         require_once __DIR__ . '/kyc.php';
         kyc_migrate_v7();
+        // v8: existing beneficiaries were never screened: they wait for review; duplicate-check keys added
+        require_once __DIR__ . '/beneficiary.php';
+        benef_migrate_v8();
         db()->prepare("REPLACE INTO settings (k, v) VALUES ('schema_version', ?)")->execute([SCHEMA_VERSION]);
         db()->commit();
     } catch (Throwable $e) { if (db()->inTransaction()) db()->rollBack(); throw $e; }
@@ -302,18 +316,20 @@ const PERMS = [
     'audit.all' => "See everyone's activity history",
     'compliance.view' => 'See the Compliance Center (KYC queue, expiring documents, reminders)',
     'compliance.manage' => 'Request updated documents, manage reminders and compliance settings',
+    'beneficiaries.manage' => 'Add, edit and deactivate beneficiaries (sub-agents: their own clients)',
+    'beneficiaries.review' => 'Screen and approve or reject beneficiaries',
 ];
 /** Compliance settings (changeable in the Compliance Center). Values are starting points pending compliance sign-off. */
 const COMPLIANCE_DEFAULTS = [
     'refresh_months_low' => '36', 'refresh_months_medium' => '24', 'refresh_months_high' => '12',
     'block_unverified' => '1', 'block_expired_doc' => '1', 'expired_grace_days' => '0', 'block_rekyc_overdue' => '1',
-    'rekyc_open_days' => '90', 'escalate_after_days' => '7', 'upload_link_days' => '7', 'reminder_max_attempts' => '3',
+    'rekyc_open_days' => '90', 'benef_high_risk_countries' => '', 'benef_max_per_client' => '10', 'escalate_after_days' => '7', 'upload_link_days' => '7', 'reminder_max_attempts' => '3',
 ];
 const DEFAULT_PERMS = [
-    'admin' => ['clients.all', 'clients.edit', 'submissions.review', 'transfers.create', 'transfers.decide', 'rates.set', 'commission.view', 'team.agents', 'log.use', 'export', 'audit.all', 'compliance.view'],
-    'compliance' => ['clients.all', 'kyc.decide', 'pii.reveal', 'submissions.review', 'audit.all', 'export', 'compliance.view', 'compliance.manage'],
+    'admin' => ['clients.all', 'clients.edit', 'submissions.review', 'transfers.create', 'transfers.decide', 'rates.set', 'commission.view', 'team.agents', 'log.use', 'export', 'audit.all', 'compliance.view', 'beneficiaries.manage'],
+    'compliance' => ['clients.all', 'kyc.decide', 'pii.reveal', 'submissions.review', 'audit.all', 'export', 'compliance.view', 'compliance.manage', 'beneficiaries.manage', 'beneficiaries.review'],
     'auditor' => ['clients.all', 'commission.view', 'audit.all', 'export', 'compliance.view'],
-    'staff' => ['clients.all', 'clients.edit', 'submissions.review', 'transfers.create', 'log.use'],
+    'staff' => ['clients.all', 'clients.edit', 'submissions.review', 'transfers.create', 'log.use', 'beneficiaries.manage'],
     'accountant' => ['clients.all', 'commission.view', 'export'],
 ];
 function role_label(string $r): string { return ROLES[$r] ?? ucfirst($r); }

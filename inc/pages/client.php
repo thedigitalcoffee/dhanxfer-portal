@@ -17,7 +17,8 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && $isAdmin && post('act') !== 'reveal
             flash('This client has KYC records, which must be kept under the record-keeping rules. It cannot be deleted.', 'bad');
             redirect('/?p=client&id=' . $c['id']);
         }
-        q('DELETE FROM beneficiaries WHERE client_id=?', [$c['id']]);
+        if (val('SELECT 1 FROM transfers WHERE client_id=? LIMIT 1', [$c['id']])) { flash('This client has transfers, so the record must be kept.', 'bad'); redirect('/?p=client&id=' . $c['id']); }
+        q('DELETE FROM beneficiary_events WHERE client_id=?', [$c['id']]); q('DELETE FROM beneficiaries WHERE client_id=?', [$c['id']]);
         q('UPDATE transfers SET client_id=NULL WHERE client_id=?', [$c['id']]);
         q('DELETE FROM clients WHERE id=?', [$c['id']]);
         audit('delete_client', 'client', $c['id'], $c['client_no']);
@@ -30,7 +31,8 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && $isAdmin && post('act') !== 'reveal
 $reveal = can('pii.reveal') && $_SERVER['REQUEST_METHOD'] === 'POST' && post('act') === 'reveal';
 audit($reveal ? 'view_pii' : 'view_client', 'client', $c['id'], $c['client_no'] . ($reveal ? ' · full ID and account numbers shown' : ''));
 $idPlain = dec($c['id_number']);
-$benefs = all('SELECT * FROM beneficiaries WHERE client_id=?', [$c['id']]);
+require_once __DIR__ . '/../beneficiary.php';
+$benefs = all("SELECT * FROM beneficiaries WHERE client_id=? ORDER BY FIELD(status,'pending','active','rejected','deactivated'), name", [$c['id']]);
 $tx = all('SELECT * FROM transfers WHERE client_id=? ORDER BY transfer_date DESC, id DESC', [$c['id']]);
 $acts = $isAdmin ? all('SELECT * FROM activities WHERE client_id=? ORDER BY act_date DESC, id DESC LIMIT 50', [$c['id']]) : [];
 $sent = [];
@@ -75,8 +77,8 @@ page_head($c['name']); ?>
   </div>
   <div>
     <div class="card"><h3 style="margin-bottom:10px">Profile</h3><dl class="kv"><?= kv('Occupation', $c['occupation']) . kv('Employer', $c['employer']) . kv('Purpose', $c['purpose']) . kv('Source of funds', $c['source_of_funds']) . kv('Monthly amount', $c['monthly_volume']) . kv('Usual destination', $c['destination']) . kv('Heard via', $c['referral']) . kv('Referred by', $c['referred_by']) . kv('Total sent', implode(' · ', array_map(fn($k, $v) => money($v, $k), array_keys($sent), $sent))) ?></dl></div>
-    <div class="card"><h3 style="margin-bottom:10px">Beneficiaries</h3>
-      <div class="list"><?php foreach ($benefs as $b): ?><div class="li"><div><strong><?= e($b['name']) ?></strong><?= $b['relation'] ? ' <span class="tag">(' . e($b['relation']) . ')</span>' : '' ?><div class="tag"><?= e(implode(' · ', array_filter([$b['bank'], $reveal ? dec($b['account']) : mask(dec($b['account']))]))) ?></div></div><div class="tag" style="text-align:right"><?= e($b['country']) ?><br><?= e($b['phone']) ?></div></div><?php endforeach; ?>
+    <div class="card"><div class="spread"><h3 style="margin:0">Beneficiaries</h3><?php if (!$isAdmin || can('beneficiaries.manage')): ?><a class="btn sm gold" href="/?p=beneficiary&client=<?= (int)$c['id'] ?>">+ Add beneficiary</a><?php endif; ?></div>
+      <div class="list" style="margin-top:10px"><?php foreach ($benefs as $b): ?><a class="li" style="color:inherit;text-decoration:none" href="/?p=beneficiary&client=<?= (int)$c['id'] ?>&id=<?= (int)$b['id'] ?>"><div><strong><?= e($b['name']) ?></strong><?= $b['relation'] ? ' <span class="tag">(' . e($b['relation']) . ')</span>' : '' ?><div class="tag"><?= e(implode(' · ', array_filter([$b['country'], $b['bank'], $reveal ? dec($b['account']) : mask(dec($b['account']))]))) ?></div></div><div style="text-align:right"><?= benef_pill($b['status']) ?></div></a><?php endforeach; ?>
       <?php if (!$benefs): ?><div class="muted">None added.</div><?php endif; ?></div></div>
     <?php if ($c['notes']): ?><div class="card"><h3 style="margin-bottom:10px">Notes</h3><p style="white-space:pre-wrap;margin:0"><?= e($c['notes']) ?></p></div><?php endif; ?>
     <p class="tag">Registered <?= fdatetime($c['created_at']) ?><?= $creator ? ' by ' . e($creator) : '' ?> · via <?= e(['admin' => 'admin', 'agent' => 'sub-agent', 'online' => 'online form', 'import' => 'import'][$c['source']] ?? $c['source']) ?><?= $c['updated_at'] ? ' · last edited ' . fdatetime($c['updated_at']) : '' ?></p>

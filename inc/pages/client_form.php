@@ -39,6 +39,11 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
         $dupe = one('SELECT id, client_no, name, agent_id FROM clients WHERE phone_e164=? AND id<>?', [$nv['phone_e164'], $c['id'] ?? 0]);
         if ($dupe) $errors[] = 'A client with this phone number already exists' . (can_see_client($dupe) ? ': ' . $dupe['name'] . ' (' . $dupe['client_no'] . ')' : '') . '. Tick "Save anyway" below if this is a different person.';
     }
+    // one KYC identity per person: the same ID document cannot belong to two client records
+    if (!$errors && trim($nv['id_number']) !== '') {
+        $idDupe = one('SELECT id, client_no, name FROM clients WHERE id_number_hash=? AND id<>?', [id_hash($nv['id_number']), $c['id'] ?? 0]);
+        if ($idDupe) $errors[] = 'This ID number already belongs to another client' . (can_see_client($idDupe) ? ': ' . $idDupe['name'] . ' (' . $idDupe['client_no'] . ')' : '') . '. Every sender needs their own identity: use that client record instead.';
+    }
     $file = null;
     if (!$errors) { try { $file = save_id_upload('id_file'); } catch (RuntimeException $ex) { $errors[] = $ex->getMessage(); } }
     if (!$errors) {
@@ -69,13 +74,12 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                 client_save_document((int)$c['id'], array_merge($nv, $new, ['id_has_address' => $hasNew]), $file, $isAdmin ? 'admin' : 'agent', (int)$u['id']);
                 if ($c['kyc'] === 'Verified') { q("UPDATE clients SET kyc='Pending' WHERE id=?", [$c['id']]); flash('The ID details changed, so this client needs a new KYC review.', 'warn'); }
             }
-            save_beneficiaries((int)$c['id'], $benefs);
             audit('edit_client', 'client', $c['id'], $c['client_no']);
             flash('Client details saved.');
             redirect('/?p=client&id=' . $c['id']);
         } else {
             $newId = insert_client($nv, ['kyc' => $kyc, 'risk' => $risk, 'agent_id' => $agentId, 'source' => $isAdmin ? 'admin' : 'agent', 'consent' => $consent, 'id_file' => $file, 'created_by' => $u['id']]);
-            save_beneficiaries($newId, $benefs);
+            foreach (save_beneficiaries($newId, $benefs, $isAdmin ? 'admin' : 'agent', (int)$u['id']) as $be) flash('Beneficiary not added: ' . $be, 'warn');
             audit('create_client', 'client', $newId, (string)val('SELECT client_no FROM clients WHERE id=?', [$newId]));
             flash('Client saved as ' . val('SELECT client_no FROM clients WHERE id=?', [$newId]) . '.');
             redirect('/?p=client&id=' . $newId);

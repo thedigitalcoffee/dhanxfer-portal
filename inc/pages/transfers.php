@@ -15,6 +15,9 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
         flash('Cannot accept: ' . implode(' ', $elig[1]), 'bad'); redirect('/?p=transfers&id=' . $t['id']);
     }
     if ($canDecide && $act === 'accept' && $t['status'] === 'pending') {
+        require_once __DIR__ . '/../beneficiary.php';
+        [$bOk, $bWhy] = benef_usable($t['beneficiary_id'] ? one('SELECT * FROM beneficiaries WHERE id=?', [$t['beneficiary_id']]) : null, (int)$t['client_id']);
+        if (!$bOk) { flash('Cannot accept: beneficiary: ' . $bWhy, 'bad'); redirect('/?p=transfers&id=' . $t['id']); }
         q("UPDATE transfers SET status='accepted', decided_by=?, decided_at=NOW(), decision_note=? WHERE id=? AND status='pending'", [$u['id'], $note ?: null, $t['id']]); $ok = 'Transfer ' . $t['ref_no'] . ' accepted.';
     } elseif ($canDecide && $act === 'reject' && $t['status'] === 'pending') {
         q("UPDATE transfers SET status='rejected', decided_by=?, decided_at=NOW(), decision_note=? WHERE id=? AND status='pending'", [$u['id'], $note ?: null, $t['id']]); $ok = 'Transfer ' . $t['ref_no'] . ' rejected.';

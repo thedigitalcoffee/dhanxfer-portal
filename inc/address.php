@@ -98,7 +98,7 @@ function addr_lookup_enabled(): bool {
     global $CONFIG;
     $p = $CONFIG['address_provider'] ?? '';
     if ($p === 'mock') return ($CONFIG['environment'] ?? 'live') !== 'live';
-    return $p === 'geoapify' && !empty($CONFIG['address_api_key']);
+    return in_array($p, ['geoapify', 'canadapost'], true) && !empty($CONFIG['address_api_key']);
 }
 /** Returns up to 5 suggestions: [['label' => ..., 'line1', 'city', 'province', 'postal', 'country'], ...] */
 function addr_lookup(string $q, string $country = ''): array {
@@ -115,19 +115,42 @@ function addr_lookup(string $q, string $country = ''): array {
         return array_map(fn($a) => $a + ['label' => $a['line1'] . ', ' . $a['city'] . ' ' . $a['province'] . ' ' . $a['postal']], $hit);
     }
     $codes = ['Canada' => 'ca', 'United States' => 'us', 'United Arab Emirates' => 'ae', 'United Kingdom' => 'gb', 'India' => 'in'];
+    if (($CONFIG['address_provider'] ?? '') === 'canadapost') {
+        // Canada Post AddressComplete: Find is free; only Retrieve (when the client picks an address) is a paid lookup
+        $res = addr_http('https://ws1.postescanada-canadapost.ca/AddressComplete/Interactive/Find/v2.10/json3.ws?' . http_build_query([
+            'Key' => $CONFIG['address_api_key'], 'SearchTerm' => $q, 'Country' => strtoupper($codes[$country] ?? 'ca'), 'MaxSuggestions' => 6, 'LanguagePreference' => 'en']));
+        $out = [];
+        foreach (($res['Items'] ?? []) as $it) if (!empty($it['Id']) && ($it['Next'] ?? '') === 'Retrieve') $out[] = ['label' => trim(($it['Text'] ?? '') . ', ' . ($it['Description'] ?? ''), ', '), 'id' => (string)$it['Id']];
+        return array_slice($out, 0, 5);
+    }
     $url = 'https://api.geoapify.com/v1/geocode/autocomplete?' . http_build_query(array_filter([
         'text' => $q, 'type' => 'street', 'limit' => 5, 'format' => 'json', 'apiKey' => $CONFIG['address_api_key'],
         'filter' => isset($codes[$country]) ? 'countrycode:' . $codes[$country] : null]));
-    $ch = curl_init($url);
-    curl_setopt_array($ch, [CURLOPT_RETURNTRANSFER => true, CURLOPT_TIMEOUT => 4, CURLOPT_CONNECTTIMEOUT => 3]);
-    $raw = curl_exec($ch); $code = (int)curl_getinfo($ch, CURLINFO_HTTP_CODE); curl_close($ch);
-    if ($code !== 200 || !is_string($raw)) return [];
     $out = [];
-    foreach ((json_decode($raw, true)['results'] ?? []) as $r) {
+    foreach ((addr_http($url)['results'] ?? []) as $r) {
         $line1 = trim(($r['housenumber'] ?? '') . ' ' . ($r['street'] ?? ''));
         if ($line1 === '') continue;
         $a = ['line1' => $line1, 'city' => (string)($r['city'] ?? ''), 'province' => (string)($r['state_code'] ?? $r['state'] ?? ''), 'postal' => (string)($r['postcode'] ?? ''), 'country' => (string)($r['country'] ?? '')];
         $out[] = $a + ['label' => (string)($r['formatted'] ?? $line1)];
     }
     return array_slice($out, 0, 5);
+}
+
+/** Full address for a suggestion that needs a second step (Canada Post Retrieve). */
+function addr_retrieve(string $id): ?array {
+    global $CONFIG;
+    if (!addr_lookup_enabled() || ($CONFIG['address_provider'] ?? '') !== 'canadapost' || !preg_match('/^[A-Za-z0-9|\-]{3,80}$/', $id)) return null;
+    $res = addr_http('https://ws1.postescanada-canadapost.ca/AddressComplete/Interactive/Retrieve/v2.11/json3.ws?' . http_build_query(['Key' => $CONFIG['address_api_key'], 'Id' => $id]));
+    foreach (($res['Items'] ?? []) as $it) {
+        if (($it['Language'] ?? 'ENG') !== 'ENG') continue;
+        return ['line1' => trim(($it['SubBuilding'] ?? '') !== '' ? $it['SubBuilding'] . '-' . ($it['BuildingNumber'] ?? '') . ' ' . ($it['Street'] ?? '') : ($it['Line1'] ?? '')),
+                'city' => (string)($it['City'] ?? ''), 'province' => (string)($it['ProvinceCode'] ?? ''), 'postal' => (string)($it['PostalCode'] ?? ''), 'country' => (string)($it['CountryName'] ?? '')];
+    }
+    return null;
+}
+function addr_http(string $url): array {
+    $ch = curl_init($url);
+    curl_setopt_array($ch, [CURLOPT_RETURNTRANSFER => true, CURLOPT_TIMEOUT => 4, CURLOPT_CONNECTTIMEOUT => 3]);
+    $raw = curl_exec($ch); $code = (int)curl_getinfo($ch, CURLINFO_HTTP_CODE); curl_close($ch);
+    return ($code === 200 && is_string($raw)) ? (json_decode($raw, true) ?: []) : [];
 }
