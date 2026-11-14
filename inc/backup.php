@@ -8,7 +8,8 @@ function backup_dir(): string {
     $d = $CONFIG['backup_dir'] ?? (dirname(__DIR__, 2) . '/dx-backups' . (defined('DX_TEST') ? '-test' : ''));
     if (!is_dir($d)) mkdir($d, 0700, true);
     $real = realpath($d) ?: $d;
-    $docroot = realpath((string)($_SERVER['DOCUMENT_ROOT'] ?? '')) ?: '';
+    $dr = (string)($_SERVER['DOCUMENT_ROOT'] ?? '');
+    $docroot = $dr !== '' ? (realpath($dr) ?: '') : ''; // realpath('') would return the current folder
     if (str_contains($real, '/public_html') || ($docroot !== '' && str_starts_with($real, $docroot)) || str_starts_with($real, realpath(dirname(__DIR__)) ?: dirname(__DIR__)))
         throw new RuntimeException('Refusing to keep backups inside the website folder: ' . $real);
     return $d;
