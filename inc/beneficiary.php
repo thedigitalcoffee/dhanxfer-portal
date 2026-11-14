@@ -68,17 +68,21 @@ function benef_update(array $b, array $in, ?int $by): array {
     if ($b['status'] === 'deactivated') return [false, ['Reactivating is not possible: add the beneficiary again so it is reviewed.']];
     if ($b['status'] === 'rejected') return [false, ['A rejected beneficiary cannot be edited. Add it again if the details were wrong: it will be screened again and the reviewer sees the earlier rejection.']];
     $kept = trim((string)($in['account'] ?? '')) === '';
-    if ($kept) $in['account'] = (string)dec($b['account']);
+    if ($kept) {
+        $acct = dec($b['account']);
+        if ($acct === null && (string)$b['account'] !== '') return [false, ['The account number on file cannot be opened right now (encryption keys unavailable). Nothing was changed.']];
+        $in['account'] = (string)$acct;
+    }
     [$v, $e] = benef_clean($in, $kept);
     if ($e) return [false, $e];
-    $old = $b; $old['account'] = (string)dec($b['account']);
+    $old = $b; $old['account'] = (string)(dec($b['account']) ?? '');
     $changed = array_values(array_filter(BENEF_FIELDS, fn($k) => trim((string)($old[$k] ?? '')) !== trim($v[$k])));
     if (!$changed) return [(int)$b['id'], []];
     if ($b['status'] === 'active') {
         [$nid, $e] = benef_add((int)$b['client_id'], array_merge($v, ['_kept' => $kept]), (string)($b['source'] ?: 'admin'), $by, (int)$b['id']);
         if (!$nid) return [false, $e];
         if (!q("UPDATE beneficiaries SET status='deactivated', replaced_by=?, updated_by=?, updated_at=NOW() WHERE id=? AND status='active'", [$nid, $by, $b['id']])->rowCount()) {
-            q('DELETE FROM beneficiaries WHERE id=?', [$nid]); q('DELETE FROM beneficiary_events WHERE beneficiary_id=?', [$nid]);
+            if (q("DELETE FROM beneficiaries WHERE id=? AND status='pending'", [$nid])->rowCount()) q('DELETE FROM beneficiary_events WHERE beneficiary_id=?', [$nid]);
             return [false, ['This beneficiary was changed by someone else just now. Open it again.']];
         }
         benef_event((int)$b['id'], (int)$b['client_id'], 'replaced', implode(',', $changed), 'New version #' . $nid . ' waits for review', $by);
@@ -123,7 +127,7 @@ function benef_review(array $b, array $reviewer, array $in): array {
     if (!role_can($reviewer['role'], 'beneficiaries.review')) return [false, ['Your role cannot review beneficiaries.']];
     if ($b['status'] !== 'pending') return [false, ['Only beneficiaries waiting for review can be decided.']];
     if (!isset($in['rev']) || (string)$in['rev'] !== (string)$b['rev']) return [false, ['The details changed while you were reviewing. Check them again before deciding.']];
-    if (setting('benef_four_eyes', '1') === '1' && in_array((int)$reviewer['id'], array_map('intval', array_filter([$b['created_by'], $b['updated_by']])), true))
+    if (setting('benef_four_eyes', '1') === '1' && in_array((int)$reviewer['id'], benef_editors($b), true))
         return [false, ['You added or changed this beneficiary, so another reviewer must decide it (four-eyes rule in the compliance settings).']];
     $d = (string)($in['decision'] ?? '');
     $notes = trim((string)($in['notes'] ?? ''));
@@ -143,6 +147,12 @@ function benef_review(array $b, array $reviewer, array $in): array {
     if (!$ok) return [false, ['Someone else just changed or decided this beneficiary. Open it again.']];
     benef_event((int)$b['id'], (int)$b['client_id'], $d === 'approve' ? 'approved' : 'rejected', null, $notes, (int)$reviewer['id']);
     return [true, []];
+}
+/** Everyone who added or changed this version (four-eyes: none of them may decide it). */
+function benef_editors(array $b): array {
+    $ids = array_map('intval', array_filter([$b['created_by'] ?? null, $b['updated_by'] ?? null]));
+    foreach (all("SELECT DISTINCT user_id FROM beneficiary_events WHERE beneficiary_id=? AND action IN ('added','edited') AND user_id IS NOT NULL", [$b['id']]) as $r) $ids[] = (int)$r['user_id'];
+    return array_values(array_unique($ids));
 }
 /** Beneficiary can receive a transfer now? Returns [ok, reason]. */
 function benef_usable(?array $b, int $clientId): array {

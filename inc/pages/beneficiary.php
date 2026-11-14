@@ -73,7 +73,7 @@ page_head($b ? 'Beneficiary · ' . $b['name'] : 'Add beneficiary'); ?>
     <h3 style="margin-bottom:10px">Review</h3>
     <?php foreach ($flags as $f): ?><div class="banner warn" style="margin:0 0 8px"><?= e($f) ?></div><?php endforeach; ?>
     <?php if (!$flags): ?><p class="tag" style="margin-top:0">No automatic flags. Still screen the name.</p><?php endif; ?>
-    <?php if (setting('benef_four_eyes', '1') === '1' && in_array((int)$u['id'], array_map('intval', array_filter([$b['created_by'], $b['updated_by']])), true)): ?><div class="banner warn" style="margin:0 0 8px">You added or changed this beneficiary: another reviewer must decide it.</div><?php endif; ?>
+    <?php if (setting('benef_four_eyes', '1') === '1' && in_array((int)$u['id'], benef_editors($b), true)): ?><div class="banner warn" style="margin:0 0 8px">You added or changed this beneficiary: another reviewer must decide it.</div><?php endif; ?>
     <div class="fields">
       <div class="f wide"><label for="screening_ref">Sanctions screening reference</label><input id="screening_ref" name="screening_ref" value="<?= e(post('screening_ref')) ?>" placeholder="tool + result ID"></div>
       <div class="f wide"><label for="verification">How were the details verified?</label><select id="verification" name="verification"><?= opts(BENEF_VERIFY_METHODS, post('verification')) ?></select></div>

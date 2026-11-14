@@ -444,6 +444,11 @@ ok(benef_usable($br($b1), $bc)[0] && !benef_usable($br($b1), $bc2)[0] && !benef_
 [$rok, $re] = benef_review($br($bf), $comp, $rv($bf, ['decision' => 'approve', 'screening_ref' => 'S-F', 'verification' => BENEF_VERIFY_METHODS[1], 'notes' => 'Bank statement seen.']));
 ok(!$rok && str_contains(implode(' ', $re), 'another reviewer'), 'four-eyes: the person who added a beneficiary cannot approve it');
 ok(benef_review($br($bf), $super, $rv($bf, ['decision' => 'approve', 'screening_ref' => 'S-F', 'verification' => BENEF_VERIFY_METHODS[1], 'notes' => 'Bank statement seen.']))[0], 'a second reviewer can approve it');
+[$bg] = benef_add($bc, ['name' => 'Gita Rao', 'country' => 'India', 'bank' => 'AXIS', 'account' => 'AX445566'], 'agent', (int)$agA['id']);
+benef_update($br($bg), ['name' => 'Gita Rao', 'country' => 'India', 'bank' => 'AXIS', 'account' => 'AX999000'], (int)$comp['id']);
+benef_update($br($bg), ['name' => 'Gita Rao', 'country' => 'India', 'bank' => 'AXIS', 'account' => '', 'phone' => '+91 91111 11111'], (int)$agA['id']);
+ok(!benef_review($br($bg), $comp, $rv($bg, ['decision' => 'approve', 'screening_ref' => 'S-G', 'verification' => BENEF_VERIFY_METHODS[0], 'notes' => 'Approving my own account change.']))[0], 'four-eyes covers everyone who changed it, not only the last editor');
+benef_deactivate($br($bg), 'test', null);
 // approved details are never overwritten: a change (even only the phone) is a new version that waits for review
 $before = $br($b1);
 q("INSERT INTO transfers (ref_no, client_id, client_name, beneficiary_id, send_amount, status, transfer_date) VALUES ('TX-BENEF-1', ?, 'Benef Sender', ?, 100, 'completed', ?)", [$bc, $b1, today()]);
