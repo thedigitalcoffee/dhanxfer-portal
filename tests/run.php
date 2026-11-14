@@ -259,6 +259,11 @@ ok(addr_compare($home, ['line1' => '12 Mian Street #5', 'city' => 'Torronto', 'p
 ok(addr_compare($home, ['line1' => '88 King Road', 'city' => 'Brampton', 'postal' => 'L6T 1A1', 'country' => 'Canada'])['result'] === 'mismatch', 'a different address is flagged for review');
 ok(addr_compare($home, null)['result'] === 'no_id_address' && addr_needs_evidence('no_id_address') && !addr_needs_evidence('minor'), 'an ID without an address needs proof of address; minor differences do not');
 
+$CONFIG['address_provider'] = 'mock'; $envWas = $CONFIG['environment'] ?? null; $CONFIG['environment'] = 'test';
+$sug = addr_lookup('100 Queen', 'Canada');
+ok(count($sug) >= 1 && $sug[0]['city'] !== '' && $sug[0]['postal'] !== '' && isset($sug[0]['label']), 'address lookup returns full components (street, city, province, postal) to fill the form');
+$CONFIG['environment'] = 'live'; ok(!addr_lookup_enabled(), 'the test address provider can never run on the live site');
+$CONFIG['address_provider'] = ''; $CONFIG['environment'] = $envWas; ok(!addr_lookup_enabled() && addr_lookup('100 Queen') === [], 'without a provider the form falls back to typing the address');
 // ---- 12. encrypted ID images ----
 $fname = date('Ymd') . '_' . bin2hex(random_bytes(12)) . '.jpg';
 $img = "\xFF\xD8\xFF\xE0 synthetic-image Synthetic Client ID";
