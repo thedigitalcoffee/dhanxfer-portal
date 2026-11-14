@@ -26,6 +26,11 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
         session_regenerate_id(true);
         $_SESSION['uid'] = $uid; $_SESSION['sv'] = (int)$user['session_version']; $_SESSION['csrf'] = bin2hex(random_bytes(32));
         audit_write($uid, 'mfa_enabled', 'user', $uid, 'first setup', client_ip());
+        if (($_SESSION['claim_super'] ?? 0) === $uid) {
+            unset($_SESSION['claim_super']);
+            $n = q("UPDATE users SET role='super_admin' WHERE id=? AND role='admin' AND NOT EXISTS (SELECT 1 FROM (SELECT id FROM users WHERE role='super_admin') x)", [$uid])->rowCount();
+            if ($n) audit_write($uid, 'super_admin_claimed', 'user', $uid, 'Verified with install key, password and new two-step login', client_ip());
+        }
         audit_write($uid, 'login', 'user', $uid, 'with two-step code', client_ip());
     } else { mfa_fail($uid); $err = 'That code did not match. Check the time on your phone and use the newest code.'; }
 }

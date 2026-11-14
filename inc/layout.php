@@ -22,6 +22,7 @@ function page_head(string $title, bool $public = false): void {
 <link rel="stylesheet" href="/assets/style.css?v=3">
 </head>
 <body class="<?= $public ? 'public' : 'app' ?><?= $u && $u['role'] === 'agent' && !$public ? ' agent' : '' ?>">
+<?php global $CONFIG; if (($CONFIG['environment'] ?? 'live') === 'staging'): ?><div style="background:#7A2E00;color:#FFE3B8;text-align:center;padding:6px;font-weight:700;font-size:13px">STAGING · test system · not real data</div><?php endif; ?>
 <header class="top">
   <a class="brand" href="/"><span class="wordmark">Dhan<b>X</b>fer</span><small><?= $public ? 'Client registration' : ($u && $u['role'] === 'agent' ? 'Sub-agent portal' : 'Team portal') ?></small></a>
   <?php if ($u && !$public): ?>
@@ -35,7 +36,7 @@ function page_head(string $title, bool $public = false): void {
     if ($u['role'] === 'agent') {
         $items = ['dashboard' => 'Home', 'rates' => "Today's rates", 'clients' => 'My clients', 'transfers' => 'My transfers', 'commission' => 'My commission', 'audit' => 'My activity', 'client_form' => '+ New client'];
     } else {
-        $all = ['dashboard' => ['Today', null], 'transfers' => ['Transfers', null], 'rates' => ['Rates', null], 'clients' => ['Clients', 'clients.all'],
+        $all = ($u['role'] === 'super_admin' ? ['insights' => ['Overview', '__super']] : []) + ['dashboard' => [$u['role'] === 'super_admin' ? "Today's operations" : 'Today', null], 'transfers' => ['Transfers', null], 'rates' => ['Rates', null], 'clients' => ['Clients', 'clients.all'],
             'submissions' => ['Online forms', 'submissions.review'], 'commission' => ['Commission', 'commission.view'], 'log' => ['Daily log', 'log.use'],
             'agents' => ['Team & sub-agents', ['team.agents', 'team.staff']], 'roles' => ['Roles', '__super'], 'audit' => ['Activity history', null], 'import' => ['Import', 'import']];
         $items = [];
@@ -50,7 +51,7 @@ function page_head(string $title, bool $public = false): void {
 ?>
 <nav class="tabs">
   <?php foreach ($items as $k => $label): ?>
-    <a href="/?p=<?= e($k) ?>" class="<?= $cur === $k ? 'active' : '' ?>"><?= e($label) ?><?php if (!empty($badges[$k])): ?> <span class="badge"><?= (int)$badges[$k] ?></span><?php endif; ?></a>
+    <a href="/?p=<?= e($k) . ($k === 'dashboard' && $u['role'] === 'super_admin' ? '&ops=1' : '') ?>" class="<?= ($cur === $k || ($k === 'insights' && $cur === 'dashboard' && $u['role'] === 'super_admin' && get('ops') !== '1' && get('d') === '')) ? 'active' : '' ?>"><?= e($label) ?><?php if (!empty($badges[$k])): ?> <span class="badge"><?= (int)$badges[$k] ?></span><?php endif; ?></a>
   <?php endforeach; ?>
 </nav>
 <?php if ($u['role'] === 'agent'): ?>

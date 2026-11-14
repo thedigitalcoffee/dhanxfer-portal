@@ -87,10 +87,10 @@ function migrate(): void {
     // v3: roles are free text so new job roles can be added; the first admin becomes super admin
     $type = db()->query("SELECT DATA_TYPE FROM information_schema.COLUMNS WHERE TABLE_SCHEMA=DATABASE() AND TABLE_NAME='users' AND COLUMN_NAME='role'")->fetchColumn();
     if ($type === 'enum') db()->exec("ALTER TABLE users MODIFY role VARCHAR(20) NOT NULL DEFAULT 'agent'");
-    if (!(int)db()->query("SELECT COUNT(*) FROM users WHERE role='super_admin'")->fetchColumn()) {
-        $first = db()->query("SELECT MIN(id) FROM users WHERE role='admin'")->fetchColumn();
-        if ($first) db()->prepare("UPDATE users SET role='super_admin' WHERE id=?")->execute([$first]);
-    }
+    // Nobody is promoted automatically. The owner claims super admin with the install key, their
+    // password and two-step login (install.php, "Claim super admin").
+    // Accounts in roles that need two-step login but have none may only set it up through a link or that claim,
+    // so a stolen password cannot be used to register an attacker's authenticator.
     if (!(int)db()->query('SELECT COUNT(*) FROM role_permissions')->fetchColumn()) {
         $ins = db()->prepare('INSERT IGNORE INTO role_permissions (role, perm) VALUES (?, ?)');
         foreach (DEFAULT_PERMS as $role => $perms) foreach ($perms as $perm) $ins->execute([$role, $perm]);
@@ -100,6 +100,10 @@ function migrate(): void {
     }
     foreach (['buy_pct' => '3', 'sell_pct' => '6', 'send_time' => '09:00', 'rates_on' => '1'] as $k => $v) {
         db()->prepare('INSERT IGNORE INTO settings (k, v) VALUES (?, ?)')->execute([$k, $v]);
+    }
+    $hasCol = db()->query("SELECT COUNT(*) FROM information_schema.COLUMNS WHERE TABLE_SCHEMA=DATABASE() AND TABLE_NAME='users' AND COLUMN_NAME='mfa_token_only'")->fetchColumn();
+    if ($hasCol && $ver !== SCHEMA_VERSION) {
+        db()->exec("UPDATE users SET mfa_token_only=1 WHERE mfa_enabled=0 AND role IN ('" . implode("','", MFA_REQUIRED) . "')");
     }
     // v4: Compliance Officer and Read-only Auditor get their default permissions once
     if (!(int)db()->query("SELECT COUNT(*) FROM role_permissions WHERE role IN ('compliance','auditor')")->fetchColumn()) {

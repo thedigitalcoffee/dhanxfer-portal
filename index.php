@@ -11,7 +11,7 @@ $pages = [
     'dashboard' => null, 'clients' => null, 'client' => null, 'transfers' => null, 'rates' => null, 'audit' => null, 'account' => null,
     'client_form' => ['clients.edit'], 'transfer_form' => ['transfers.create'],
     'commission' => ['commission.view'], 'submissions' => ['submissions.review'],
-    'agents' => ['team.agents', 'team.staff'], 'log' => ['log.use'], 'import' => ['import'], 'roles' => ['__super'], 'mfa' => null,
+    'agents' => ['team.agents', 'team.staff'], 'log' => ['log.use'], 'import' => ['import'], 'roles' => ['__super'], 'insights' => ['__super'], 'mfa' => null,
 ];
 $p = get('p', 'dashboard');
 if (!array_key_exists($p, $pages)) $p = 'dashboard';

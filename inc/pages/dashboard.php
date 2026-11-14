@@ -47,6 +47,9 @@ if ($u['role'] === 'agent') {
     <?php page_foot(); return;
 }
 
+/* ---------------- super admin lands on the owner overview ---------------- */
+if ($u['role'] === 'super_admin' && get('ops') !== '1' && get('d') === '') { require __DIR__ . '/insights.php'; return; }
+
 /* ---------------- admin ---------------- */
 $d = valid_date(get('d')) ?? today();
 $tx = all("SELECT * FROM transfers WHERE transfer_date=? AND status IN ('accepted','completed')", [$d]);

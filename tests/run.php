@@ -17,10 +17,43 @@ function mkuser(string $role, string $name, ?string $ref = null): array {
     return one('SELECT * FROM users WHERE id=?', [(int)db()->lastInsertId()]);
 }
 
+function wipe_db() { db()->exec('SET FOREIGN_KEY_CHECKS=0'); foreach (db()->query('SHOW TABLES')->fetchAll(PDO::FETCH_COLUMN) as $t) db()->exec("DROP TABLE `$t`"); }
+require __DIR__ . '/../inc/backup.php';
+
+// ---- 0. upgrade from version 2 with synthetic data ----
+wipe_db();
+foreach (array_filter(array_map('trim', explode(';', file_get_contents(__DIR__ . '/fixtures/schema_v2.sql')))) as $sql) db()->exec($sql);
+db()->exec("INSERT INTO users (role, username, name, password_hash) VALUES ('admin','owner','Synthetic Owner','x'),('admin','second','Synthetic Admin','x'),('agent','agent1','Synthetic Agent','x')");
+db()->exec("INSERT INTO clients (client_no, name, phone, id_number, agent_id) VALUES ('DX-TEST-0001','Synthetic Client','+1 416 555 0100','AB123456',3)");
+db()->exec("INSERT INTO beneficiaries (client_id, name, account) VALUES (1,'Synthetic Beneficiary','000999888777')");
+db()->exec("INSERT INTO submissions (data, name, phone) VALUES ('{\"name\":\"Synthetic\",\"id_number\":\"ZZ998877\"}','Synthetic','+1 416 555 0199')");
+migrate();
+ok((string)setting('schema_version') === SCHEMA_VERSION, 'v2 database upgrades to schema ' . SCHEMA_VERSION);
+ok((int)val("SELECT COUNT(*) FROM users WHERE role='super_admin'") === 0, 'upgrade promotes nobody to super admin');
+ok((int)val("SELECT COUNT(*) FROM users WHERE role='admin' AND mfa_token_only=1") === 2, 'existing admins can only set up two-step login through a verified link or claim');
+ok((int)val("SELECT mfa_token_only FROM users WHERE username='agent1'") === 0, 'sub-agents are not locked out');
+$cid = one('SELECT * FROM clients WHERE client_no=?', ['DX-TEST-0001']);
+ok(str_starts_with((string)$cid['id_number'], 'enc:v1:') && dec($cid['id_number']) === 'AB123456' && $cid['id_number_hash'] === id_hash('AB123456'), 'existing ID number encrypted and searchable after upgrade');
+ok(dec((string)val('SELECT account FROM beneficiaries LIMIT 1')) === '000999888777' && str_starts_with((string)val('SELECT account FROM beneficiaries LIMIT 1'), 'enc:'), 'existing account number encrypted after upgrade');
+ok(!str_contains((string)val('SELECT data FROM submissions LIMIT 1'), 'ZZ998877') && str_contains((string)dec(val('SELECT data FROM submissions LIMIT 1')), 'ZZ998877'), 'existing online forms encrypted after upgrade');
+migrate(); // running again must change nothing
+ok(dec(val("SELECT id_number FROM clients WHERE client_no='DX-TEST-0001'")) === 'AB123456', 'upgrade is safe to run twice (no double encryption)');
+
+// ---- 0b. backup and restore ----
+$before = db_fingerprint();
+$bk = backup_create('test');
+q("UPDATE clients SET name='Damaged' WHERE client_no='DX-TEST-0001'"); q('DELETE FROM beneficiaries');
+ok(db_fingerprint() != $before, 'test damage changes the fingerprint');
+$res = backup_restore($bk['file']);
+ok($res['match'] && db_fingerprint() == $before, 'restore brings back an identical database (fingerprint match)');
+ok(dec((string)val('SELECT account FROM beneficiaries LIMIT 1')) === '000999888777', 'restored data still decrypts');
+$raw = (string)file_get_contents(backup_dir() . '/' . $bk['file']);
+ok(!str_contains($raw, 'Synthetic') && !str_contains(gzdecode(substr($raw, 4)) ?: '', 'Synthetic'), 'backup file is encrypted (no readable names inside)');
+ok(!str_starts_with(realpath(backup_dir()), realpath(__DIR__ . '/..')), 'backups are stored outside the website folder');
+foreach (glob(backup_dir() . '/dx-*.bak') ?: [] as $f) @unlink($f);
+
 // ---- fresh test database ----
-$tables = db()->query('SHOW TABLES')->fetchAll(PDO::FETCH_COLUMN);
-db()->exec('SET FOREIGN_KEY_CHECKS=0');
-foreach ($tables as $t) db()->exec("DROP TABLE `$t`");
+wipe_db();
 migrate();
 ok((string)setting('schema_version') === SCHEMA_VERSION, 'database builds from scratch to schema ' . SCHEMA_VERSION);
 
@@ -149,5 +182,5 @@ $report = $summary . implode("\n", $out) . "\n";
 echo $report;
 @file_put_contents(__DIR__ . '/../storage/test-report.txt', $report);
 // leave the test database empty
-foreach (db()->query('SHOW TABLES')->fetchAll(PDO::FETCH_COLUMN) as $t) db()->exec("TRUNCATE TABLE `$t`");
+wipe_db();
 exit($fail ? 1 : 0);
