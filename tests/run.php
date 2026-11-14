@@ -46,7 +46,7 @@ function mkuser(string $role, string $name, ?string $ref = null): array {
 })();
 function mark_test_db() { q("REPLACE INTO settings (k, v) VALUES ('db_role', 'test')"); }
 function wipe_db() { db()->exec('SET FOREIGN_KEY_CHECKS=0'); foreach (db()->query('SHOW TABLES')->fetchAll(PDO::FETCH_COLUMN) as $t) db()->exec("DROP TABLE `$t`"); }
-require __DIR__ . '/../inc/backup.php';
+require_once __DIR__ . '/../inc/backup.php';
 
 // ---- 0. upgrade from version 2 with synthetic data ----
 wipe_db();
@@ -61,6 +61,14 @@ $longId = str_repeat('L', 80); $iban = 'GB82WEST12345698765432XXXXXXXXXXXX'; $un
 q("INSERT INTO clients (client_no, name, phone, id_number, agent_id) VALUES ('DX-TEST-0002','Synthetic Long','+1 416 555 0101',?,3),('DX-TEST-0003','Synthetic Uni','+1 416 555 0102',?,3),('DX-TEST-0004','Synthetic Empty','+1 416 555 0103','',3)", [$longId, $uni]);
 q("INSERT INTO beneficiaries (client_id, name, account) VALUES (2,'Synthetic IBAN',?),(2,'Synthetic Long',?)", [$iban, str_repeat('9', 80)]);
 ok(in_array('STRICT_ALL_TABLES', explode(',', (string)db()->query('SELECT @@SESSION.sql_mode')->fetchColumn()), true), 'database rejects truncated values instead of cutting them silently');
+// rollback drill: back up the old (v2) database, upgrade, restore the backup, upgrade again
+$fpV2 = db_fingerprint(); $bkV2 = backup_create('pre-upgrade');
+migrate();
+ok((string)setting('schema_version') === SCHEMA_VERSION && $fpV2 != db_fingerprint(), 'rollback drill: upgrade ran on the v2 copy');
+$rr = backup_restore($bkV2['file']);
+ok($rr['match'] && db_fingerprint() == $fpV2 && (string)val("SELECT id_number FROM clients WHERE client_no='DX-TEST-0001'") === 'AB123456', 'rollback drill: restoring the pre-upgrade backup returns the exact v2 database');
+ok((int)val("SELECT CHARACTER_MAXIMUM_LENGTH FROM information_schema.COLUMNS WHERE TABLE_SCHEMA=DATABASE() AND TABLE_NAME='clients' AND COLUMN_NAME='id_number'") === 80, 'rollback drill: old table layout is back too');
+@unlink(backup_dir() . '/' . $bkV2['file']);
 migrate();
 require_once __DIR__ . '/../inc/verify.php';
 ok(dec((string)val("SELECT id_number FROM clients WHERE client_no='DX-TEST-0002'")) === $longId, 'longest possible old ID number (80 characters) survives encryption exactly');

@@ -56,6 +56,9 @@ function backup_read(string $name): array {
 /** Replaces the whole database (and uploaded IDs) with the backup, then proves it matches. */
 function backup_restore(string $name): array {
     $data = backup_read($name);
+    // Put back exactly what was saved, even values an older, non-strict database allowed (e.g. zero dates).
+    $mode = (string)db()->query('SELECT @@SESSION.sql_mode')->fetchColumn();
+    db()->exec("SET SESSION sql_mode='NO_ENGINE_SUBSTITUTION'");
     db()->exec('SET FOREIGN_KEY_CHECKS=0');
     foreach (db()->query('SHOW TABLES')->fetchAll(PDO::FETCH_COLUMN) as $t) db()->exec("DROP TABLE `$t`");
     foreach ($data['tables'] as $t => $tbl) {
@@ -70,6 +73,7 @@ function backup_restore(string $name): array {
         }
     }
     db()->exec('SET FOREIGN_KEY_CHECKS=1');
+    db()->prepare('SET SESSION sql_mode=?')->execute([$mode]);
     $ids = ids_dir();
     if (!is_dir($ids)) mkdir($ids, 0750, true);
     foreach (glob($ids . '/*') ?: [] as $f) if (is_file($f) && !isset($data['files'][basename($f)])) @unlink($f); // files added after the backup
