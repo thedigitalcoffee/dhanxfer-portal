@@ -368,7 +368,7 @@ ok(val("SELECT reason FROM rekyc_cases WHERE client_id=?", [$pc2]) === 'periodic
 $link = upload_request_create($kc, (int)$super['id']);
 $tok = substr($link, strpos($link, 't=') + 2);
 $ur = upload_request_find($tok);
-ok($ur && (int)$ur['client_id'] === $kc && !str_contains($link, (string)$kc), 'upload link made; it carries a random token, not the client number');
+ok($ur && (int)$ur['client_id'] === $kc && preg_match('#/upload\?t=[a-f0-9]{48}$#', $link), 'upload link made; it carries only a random token, not the client number');
 for ($i = 0; $i < 5; $i++) upload_request_verify(upload_request_find($tok) ?? $ur, '1990-01-01', '0000');
 ok(upload_request_find($tok) === null, 'upload link locks after 5 wrong identity checks');
 $link = upload_request_create($kc, (int)$super['id']); $tok = substr($link, strpos($link, 't=') + 2);
