@@ -1,17 +1,35 @@
 <?php
 defined('DX') or exit;
+require_once __DIR__ . '/kyc.php';
 
 /** Read and clean the client fields from POST. Returns [fields, beneficiaries, errors]. */
 function read_client_post(int $clientId = 0): array {
     $v = [];
     foreach (CLIENT_FIELDS as $k) $v[$k] = mb_substr(post($k), 0, $k === 'notes' ? 4000 : 250);
     foreach (['dob', 'id_expiry'] as $d) $v[$d] = $v[$d] !== '' ? (valid_date($v[$d]) ?? '') : '';
-    if ($v['whatsapp'] === '') $v['whatsapp'] = $v['phone'];
     $err = [];
+    // questions that were hidden because they did not apply are ignored even if a value came in
+    $v['wa_same'] = post('wa_same') === 'no' ? 'no' : 'yes';
+    if ($v['wa_same'] === 'yes') $v['whatsapp'] = '';
+    if (!in_array($v['occupation'], ['Employed', 'Self-employed'], true) && in_array($v['occupation'], OCCUPATIONS, true)) $v['employer'] = '';
+    if ($v['purpose'] === 'Other' && trim(post('purpose_other')) !== '') $v['purpose'] = 'Other: ' . mb_substr(trim(post('purpose_other')), 0, 70);
+    $v['purpose_other'] = mb_substr(trim(post('purpose_other')), 0, 80);
+    $v['address_source'] = post('address_source') === 'lookup' ? 'lookup' : 'manual';
+    $v['id_has_address'] = in_array(post('id_has_address'), ['yes', 'no'], true) ? post('id_has_address') : '';
+    $v['id_addr_same'] = post('id_addr_same') === 'no' ? 'no' : 'yes';
+    foreach (['id_addr_line1', 'id_addr_city', 'id_addr_postal'] as $k) $v[$k] = $v['id_has_address'] === 'yes' && $v['id_addr_same'] === 'no' ? mb_substr(trim(post($k)), 0, 160) : '';
     if ($v['name'] === '') $err[] = 'Full name is required.';
-    if ($v['phone'] === '' || !preg_match('/^[+0-9 ()\-.]{7,25}$/', $v['phone'])) $err[] = 'Enter a valid phone number with country code.';
+    // phone: checked for the country the client chose (not guessed from the connection)
+    $region = phone_region($v['country']) ?? (str_starts_with(trim($v['phone']), '+') ? null : ($v['office'] === 'Dubai' ? 'AE' : null));
+    $ph = phone_check($v['phone'], $region);
+    if (!$ph['ok']) $err[] = 'Phone: ' . $ph['error'];
+    else { $v['phone_e164'] = $ph['e164']; $v['phone_region'] = $ph['region']; $v['phone'] = $ph['international']; }
+    if ($v['whatsapp'] !== '') { $wa = phone_check($v['whatsapp'], $region); if (!$wa['ok']) $err[] = 'WhatsApp: ' . $wa['error']; else $v['whatsapp'] = $wa['international']; }
+    else $v['whatsapp'] = $v['phone'];
+    if ($v['office'] === '' && $v['country'] !== '') $v['office'] = $v['country'] === 'United Arab Emirates' ? 'Dubai' : 'Canada';
     if ($v['email'] !== '' && !filter_var($v['email'], FILTER_VALIDATE_EMAIL)) $err[] = 'The email address does not look right.';
     if ($v['office'] !== '' && !in_array($v['office'], OFFICES, true)) $v['office'] = '';
+    if ($v['id_expiry'] !== '' && $v['id_expiry'] < today()) $err[] = 'The ID has already expired. Please use a current ID.';
     $b = [];
     $bn = $_POST['b_name'] ?? [];
     if (is_array($bn)) {
@@ -53,8 +71,27 @@ function insert_client(array $v, array $extra): int {
     $vals[] = $extra['id_file'] ?? null;
     $vals[] = $extra['created_by'] ?? null;
     $vals[] = id_hash($v['id_number'] ?? '');
+    $cols = array_merge($cols, ['phone_e164', 'phone_region', 'address_source']);
+    array_push($vals, $v['phone_e164'] ?? null, $v['phone_region'] ?? null, $v['address_source'] ?? null);
+    // the ID number and file live in the document history; the client row only keeps a summary (set by doc_add_version)
+    $idx = array_search('id_number', $cols, true); $vals[$idx] = null; $vals[array_search('id_number_hash', $cols, true)] = null; $vals[array_search('id_file', $cols, true)] = null;
     q('INSERT INTO clients (' . implode(',', $cols) . ') VALUES (' . implode(',', array_fill(0, count($cols), '?')) . ')', $vals);
-    return (int)db()->lastInsertId();
+    $id = (int)db()->lastInsertId();
+    client_save_document($id, $v, $extra['id_file'] ?? null, (string)($extra['source'] ?? 'admin'), $extra['created_by'] ?? null);
+    return $id;
+}
+/** Records the ID details from a form as a new document version (only when something about the ID was given). */
+function client_save_document(int $clientId, array $v, ?string $file, string $source, ?int $by): ?int {
+    require_once __DIR__ . '/kyc.php';
+    $num = trim((string)($v['id_number'] ?? ''));
+    $has = ($v['id_has_address'] ?? '') === 'yes' ? true : (($v['id_has_address'] ?? '') === 'no' ? false : null);
+    if ($num === '' && !$file && ($v['id_expiry'] ?? '') === '' && ($v['id_type'] ?? '') === '') return null;
+    $addr = null;
+    if ($has && ($v['id_addr_same'] ?? 'yes') === 'no')
+        $addr = ['line1' => $v['id_addr_line1'] ?? '', 'city' => $v['id_addr_city'] ?? '', 'postal' => $v['id_addr_postal'] ?? '', 'country' => $v['id_country'] ?? ''];
+    $src = in_array($source, ['admin', 'agent', 'online', 'upload_link', 'migration'], true) ? $source : 'admin';
+    return doc_add_version($clientId, ['doc_type' => $v['id_type'] ?? null, 'number' => $num, 'issuing_country' => $v['id_country'] ?? null,
+        'expires_on' => $v['id_expiry'] ?? null, 'has_address' => $has, 'address' => $addr, 'file_name' => $file], $src, $by);
 }
 
 /**
@@ -99,10 +136,12 @@ function client_fields(array $v, array $benefs, string $mode, array $agents = []
         <div class="f"><label for="id_country">ID issuing country</label><input id="id_country" name="id_country" list="countries" value="<?= $g('id_country') ?>"></div>
         <div class="f"><label for="id_expiry">ID expiry date</label><input id="id_expiry" name="id_expiry" type="date" value="<?= $g('id_expiry') ?>"></div>
         <div class="f wide"><label for="id_file">Photo or scan of the ID (optional, JPG/PNG/PDF, max 6 MB)<?= !empty($v['id_file']) ? ' · a file is already on record; uploading replaces it' : '' ?></label><input id="id_file" name="id_file" type="file" accept="image/*,application/pdf"></div>
-        <?php if ($mode === 'admin'): ?>
-        <div class="f"><label for="kyc">KYC status</label><select id="kyc" name="kyc"><?= opts(KYC, $sel('kyc') ?: 'Pending', '') ?></select></div>
-        <div class="f"><label for="risk">Risk level</label><select id="risk" name="risk"><?= opts(RISK, $sel('risk') ?: 'Low', '') ?></select></div>
-        <?php endif; ?>
+        <div class="f"><label for="id_has_address">Does the ID show an address?</label><select id="id_has_address" name="id_has_address"><option value="">Not known</option><option value="yes"<?= ($v['id_has_address'] ?? '') === 'yes' || ($v['id_has_address'] ?? '') === '1' ? ' selected' : '' ?>>Yes</option><option value="no"<?= ($v['id_has_address'] ?? '') === 'no' || ($v['id_has_address'] ?? '') === '0' ? ' selected' : '' ?>>No</option></select></div>
+        <div class="f"><label for="id_addr_same">Address on ID</label><select id="id_addr_same" name="id_addr_same"><option value="yes">Same as home address</option><option value="no"<?= ($v['id_addr_same'] ?? '') === 'no' ? ' selected' : '' ?>>Different (enter below)</option></select></div>
+        <div class="f wide"><label for="id_addr_line1">Street address on the ID (if different)</label><input id="id_addr_line1" name="id_addr_line1" value="<?= $g('id_addr_line1') ?>"></div>
+        <div class="f"><label for="id_addr_city">City on the ID</label><input id="id_addr_city" name="id_addr_city" value="<?= $g('id_addr_city') ?>"></div>
+        <div class="f"><label for="id_addr_postal">Postal code on the ID</label><input id="id_addr_postal" name="id_addr_postal" value="<?= $g('id_addr_postal') ?>"></div>
+        <div class="f wide"><p class="tag" style="margin:0">KYC status and risk are set on the KYC review screen, not here.</p></div>
       </div>
     </fieldset>
     <fieldset>
@@ -148,77 +187,96 @@ function client_fields(array $v, array $benefs, string $mode, array $agents = []
 }
 
 /**
- * Step-by-step version of the client form (public registration and sub-agents on mobile).
- * Same field names as client_fields(), so the same server code reads it.
- * Without JavaScript every step shows at once and the form still works.
+ * Step-by-step client form (public registration and sub-agents). Mobile-first and short:
+ * questions that do not apply stay hidden (data-show-if), the office follows the country, and the phone
+ * field shows the country code for the chosen country. Without JavaScript every step shows and still works.
  */
 function client_wizard(array $v, array $benefs, string $mode): void {
     $locked = $mode === 'public_locked';
     $pub = $mode === 'public' || $locked;
     $g = fn($k) => e($v[$k] ?? '');
-    $sel = fn($k) => $v[$k] ?? '';
-    $you = $pub ? 'your' : "the client's";
+    $sel = fn($k) => (string)($v[$k] ?? '');
+    $yes = fn($k, $val) => ($v[$k] ?? '') === $val ? 'checked' : '';
     $b = $benefs[0] ?? [];
     $bv = fn($k) => e($b[$k] ?? '');
+    $you = $pub ? 'you' : 'the client';
+    $your = $pub ? 'your' : "the client's";
+    $dial = [];
+    foreach (COUNTRIES as $cn) $dial[$cn] = phone_dial_code(phone_region($cn));
     echo datalist('countries', COUNTRIES);
     ?>
+    <script type="application/json" id="dialCodes"><?= json_encode($dial, JSON_HEX_TAG | JSON_UNESCAPED_UNICODE) ?></script>
+    <input type="hidden" name="address_source" id="address_source" value="<?= $g('address_source') ?: 'manual' ?>">
     <div class="wiz-head" hidden>
       <div class="wiz-bar"><span id="wizFill"></span></div>
       <div class="row" style="justify-content:space-between;margin-top:8px"><strong id="wizTitle"></strong><span class="tag" id="wizCount"></span></div>
     </div>
 
     <section class="step" data-title="<?= $pub ? "Let's get started" : 'Client basics' ?>">
-      <?php if ($pub): ?><p class="tag" style="margin-top:0">Just 3 details to begin. It takes about 2 minutes in total.</p><?php endif; ?>
+      <?php if ($pub): ?><p class="tag" style="margin-top:0">About 2 minutes. You can save and finish later.</p><?php endif; ?>
       <div class="fields one">
         <div class="f"><label for="name">Full legal name<?= $pub ? ' (as on your ID)' : '' ?> <span class="req">*</span></label><input id="name" name="name" required maxlength="160" value="<?= $g('name') ?>" autocomplete="name"></div>
-        <div class="f"><label for="phone">Phone number <span class="req">*</span></label><input id="phone" name="phone" type="tel" inputmode="tel" required placeholder="+1 416 555 0123" pattern="[+0-9 ()\-.]{7,25}" value="<?= $g('phone') ?>" autocomplete="tel"></div>
-        <div class="f"><label for="whatsapp">WhatsApp number <span class="tag">(leave empty if same as phone)</span></label><input id="whatsapp" name="whatsapp" type="tel" inputmode="tel" value="<?= $g('whatsapp') ?>"></div>
-        <div class="f"><span class="lbl"><?= $pub ? 'Which DhanXfer office?' : 'Office' ?> <span class="req">*</span></span>
-          <div class="choice"><?php foreach (OFFICES as $o): ?><label><input type="radio" name="office" value="<?= e($o) ?>" required <?= $sel('office') === $o ? 'checked' : '' ?>><span><?= e($o) ?></span></label><?php endforeach; ?></div></div>
+        <div class="f"><label for="country">Country where <?= $pub ? 'you live' : 'the client lives' ?> <span class="req">*</span></label><select id="country" name="country" required autocomplete="country-name"><?= opts(array_merge(COUNTRIES, ['Other']), $sel('country')) ?></select></div>
+        <div class="f"><label for="phone">Mobile number <span class="req">*</span></label>
+          <div class="phone-row"><span class="dial" id="dialShow" aria-hidden="true"><?= e($dial[$sel('country')] ?? '+') ?></span><input id="phone" name="phone" type="tel" inputmode="tel" required value="<?= $g('phone') ?>" autocomplete="tel-national" placeholder="416 555 0123" maxlength="25"></div>
+          <div class="tag" id="phoneHint">Spaces and dashes are fine. For another country, start with + and its code.</div></div>
+        <div class="f"><span class="lbl">Is this number on WhatsApp?</span>
+          <div class="choice"><label><input type="radio" name="wa_same" value="yes" <?= ($v['wa_same'] ?? 'yes') === 'yes' ? 'checked' : '' ?>><span>Yes</span></label><label><input type="radio" name="wa_same" value="no" <?= $yes('wa_same', 'no') ?>><span>No, another number</span></label></div></div>
+        <div class="f" data-show-if="wa_same=no"><label for="whatsapp">WhatsApp number</label><input id="whatsapp" name="whatsapp" type="tel" inputmode="tel" value="<?= $g('whatsapp') ?>"></div>
       </div>
     </section>
 
-    <section class="step" data-title="<?= $pub ? 'About you' : 'Personal details' ?>">
+    <section class="step" data-title="<?= $pub ? 'Where do you live?' : 'Home address' ?>">
       <div class="fields">
-        <div class="f"><label for="dob">Date of birth</label><input id="dob" name="dob" type="date" value="<?= $g('dob') ?>"></div>
-        <div class="f"><label for="email">Email</label><input id="email" name="email" type="email" inputmode="email" value="<?= $g('email') ?>" autocomplete="email"></div>
-        <div class="f"><label for="nationality">Nationality</label><input id="nationality" name="nationality" list="countries" value="<?= $g('nationality') ?>"></div>
-        <div class="f"><label for="occupation">Occupation</label><input id="occupation" name="occupation" value="<?= $g('occupation') ?>"></div>
-        <div class="f wide"><label for="employer">Employer / business name</label><input id="employer" name="employer" value="<?= $g('employer') ?>"></div>
-      </div>
-    </section>
-
-    <section class="step" data-title="<?= $pub ? 'Your address' : 'Address' ?>">
-      <div class="fields">
-        <div class="f wide"><label for="address">Street address</label><input id="address" name="address" value="<?= $g('address') ?>" autocomplete="street-address"></div>
+        <div class="f wide suggest"><label for="address">Street address <span class="tag">(with unit or apartment)</span></label><input id="address" name="address" value="<?= $g('address') ?>" autocomplete="<?= addr_lookup_enabled() ? 'off' : 'street-address' ?>" data-lookup="<?= addr_lookup_enabled() ? '1' : '' ?>" placeholder="<?= addr_lookup_enabled() ? 'Start typing, then pick your address' : '' ?>"><div class="suggest-list" id="addrList" hidden></div></div>
         <div class="f"><label for="city">City</label><input id="city" name="city" value="<?= $g('city') ?>" autocomplete="address-level2"></div>
-        <div class="f"><label for="province">Province / Emirate</label><input id="province" name="province" value="<?= $g('province') ?>" autocomplete="address-level1"></div>
-        <div class="f"><label for="postal">Postal code</label><input id="postal" name="postal" value="<?= $g('postal') ?>" autocomplete="postal-code"></div>
-        <div class="f"><label for="country">Country of residence</label><input id="country" name="country" list="countries" value="<?= $g('country') ?>"></div>
+        <div class="f"><label for="province">Province / State / Emirate</label><input id="province" name="province" value="<?= $g('province') ?>" autocomplete="address-level1"></div>
+        <div class="f"><label for="postal">Postal code</label><input id="postal" name="postal" value="<?= $g('postal') ?>" autocomplete="postal-code" style="text-transform:uppercase"></div>
       </div>
+      <?php if (addr_lookup_enabled()): ?><p class="tag">Can't find it? Just type it in the boxes.</p><?php endif; ?>
     </section>
 
     <section class="step" data-title="<?= $pub ? 'Your photo ID' : 'Photo ID' ?>">
       <p class="tag" style="margin-top:0"><?= $pub ? 'Required by law for money transfers. We check your original ID before your first transfer.' : 'Check the original ID before the first transfer.' ?></p>
       <div class="fields">
         <div class="f"><label for="id_type">ID type</label><select id="id_type" name="id_type"><?= opts(ID_TYPES, $sel('id_type')) ?></select></div>
-        <div class="f"><label for="id_number">ID number</label><input id="id_number" name="id_number" value="<?= $g('id_number') ?>" autocomplete="off"></div>
+        <div class="f"><label for="id_number">ID number</label><input id="id_number" name="id_number" value="<?= $g('id_number') ?>" autocomplete="off" maxlength="60"></div>
         <div class="f"><label for="id_country">Issuing country</label><input id="id_country" name="id_country" list="countries" value="<?= $g('id_country') ?>"></div>
         <div class="f"><label for="id_expiry">Expiry date</label><input id="id_expiry" name="id_expiry" type="date" value="<?= $g('id_expiry') ?>"></div>
-        <div class="f wide"><label for="id_file">Photo of the ID <span class="tag">(optional · JPG, PNG or PDF, up to 6 MB)</span></label><input id="id_file" name="id_file" type="file" accept="image/*,application/pdf" capture="environment"></div>
+        <div class="f wide"><span class="lbl">Does the ID show <?= $your ?> address?</span>
+          <div class="choice"><label><input type="radio" name="id_has_address" value="yes" <?= $yes('id_has_address', 'yes') ?>><span>Yes</span></label><label><input type="radio" name="id_has_address" value="no" <?= $yes('id_has_address', 'no') ?>><span>No</span></label></div></div>
+        <div class="f wide" data-show-if="id_has_address=yes"><span class="lbl">Is it the same as the home address?</span>
+          <div class="choice"><label><input type="radio" name="id_addr_same" value="yes" <?= ($v['id_addr_same'] ?? '') !== 'no' ? 'checked' : '' ?>><span>Yes, same</span></label><label><input type="radio" name="id_addr_same" value="no" <?= $yes('id_addr_same', 'no') ?>><span>No, it's different</span></label></div></div>
+        <div class="f wide" data-show-if="id_has_address=yes&amp;id_addr_same=no"><label for="id_addr_line1">Address on the ID</label><input id="id_addr_line1" name="id_addr_line1" value="<?= $g('id_addr_line1') ?>"></div>
+        <div class="f" data-show-if="id_has_address=yes&amp;id_addr_same=no"><label for="id_addr_city">City on the ID</label><input id="id_addr_city" name="id_addr_city" value="<?= $g('id_addr_city') ?>"></div>
+        <div class="f" data-show-if="id_has_address=yes&amp;id_addr_same=no"><label for="id_addr_postal">Postal code on the ID</label><input id="id_addr_postal" name="id_addr_postal" value="<?= $g('id_addr_postal') ?>" style="text-transform:uppercase"></div>
+        <div class="f wide"><label for="id_file">Photo of the ID <span class="tag">(JPG, PNG or PDF, up to 6 MB)</span></label><input id="id_file" name="id_file" type="file" accept="image/*,application/pdf" capture="environment"></div>
+      </div>
+      <p class="tag" data-show-if="id_has_address=no">No problem: we may ask for a bill or bank statement showing <?= $your ?> address.</p>
+    </section>
+
+    <section class="step" data-title="<?= $pub ? 'About you' : 'Personal details' ?>">
+      <div class="fields">
+        <div class="f"><label for="dob">Date of birth</label><input id="dob" name="dob" type="date" value="<?= $g('dob') ?>" autocomplete="bday"></div>
+        <div class="f"><label for="email">Email <span class="tag">(for reminders)</span></label><input id="email" name="email" type="email" inputmode="email" value="<?= $g('email') ?>" autocomplete="email"></div>
+        <div class="f"><label for="nationality">Nationality</label><input id="nationality" name="nationality" list="countries" value="<?= $g('nationality') ?>"></div>
+        <div class="f"><label for="occupation">Work</label><select id="occupation" name="occupation"><?= opts(OCCUPATIONS, $sel('occupation')) ?></select></div>
+        <div class="f wide" data-show-if="occupation=Employed|Self-employed"><label for="employer">Employer or business name</label><input id="employer" name="employer" value="<?= $g('employer') ?>"></div>
       </div>
     </section>
 
     <section class="step" data-title="<?= $pub ? 'About your transfers' : 'Transfer profile' ?>">
       <div class="fields">
         <div class="f"><label for="purpose">Main purpose</label><select id="purpose" name="purpose"><?= opts(PURPOSES, $sel('purpose')) ?></select></div>
-        <div class="f"><label for="source_of_funds">Source of funds</label><select id="source_of_funds" name="source_of_funds"><?= opts(SOF, $sel('source_of_funds')) ?></select></div>
+        <div class="f" data-show-if="purpose=Other"><label for="purpose_other">Please describe</label><input id="purpose_other" name="purpose_other" value="<?= $g('purpose_other') ?>" maxlength="80"></div>
+        <div class="f"><label for="source_of_funds">Where the money comes from</label><select id="source_of_funds" name="source_of_funds"><?= opts(SOF, $sel('source_of_funds')) ?></select></div>
         <div class="f"><label for="monthly_volume">Expected monthly amount</label><select id="monthly_volume" name="monthly_volume"><?= opts(VOLUMES, $sel('monthly_volume')) ?></select></div>
         <div class="f"><label for="destination">Usual destination country</label><input id="destination" name="destination" list="countries" value="<?= $g('destination') ?>"></div>
-        <div class="f"><label for="referral">How did <?= $pub ? 'you' : 'they' ?> hear about us?</label><select id="referral" name="referral"><?= opts(HEARD, $sel('referral')) ?></select></div>
-        <div class="f"><label for="referred_by">Referred by (name)</label><input id="referred_by" name="referred_by" value="<?= $g('referred_by') ?>"></div>
-        <?php if ($locked): ?><div class="f"><span class="lbl">DhanXfer agent</span><div class="secret" style="font-size:15px;padding:9px 10px"><?= $g('ref_code') ?></div></div>
-        <?php elseif ($pub): ?><div class="f"><label for="ref_code">Agent code, if an agent helped you</label><input id="ref_code" name="ref_code" placeholder="e.g. SA-1023" value="<?= $g('ref_code') ?>" style="text-transform:uppercase"></div><?php endif; ?>
+        <?php if ($locked): ?><div class="f"><span class="lbl">DhanXfer agent</span><div class="secret" style="font-size:15px;padding:9px 10px"><?= $g('ref_label') ?: $g('ref_code') ?></div></div>
+        <?php elseif ($pub): ?>
+        <div class="f"><label for="referral">How did you hear about us?</label><select id="referral" name="referral"><?= opts(HEARD, $sel('referral')) ?></select></div>
+        <div class="f" data-show-if="referral=Referral"><label for="ref_code">Agent's code or name, if an agent helped you</label><input id="ref_code" name="ref_code" value="<?= $g('ref_code') ?>" autocapitalize="none"></div>
+        <?php endif; ?>
       </div>
     </section>
 
@@ -226,7 +284,7 @@ function client_wizard(array $v, array $benefs, string $mode): void {
       <p class="tag" style="margin-top:0">Optional. <?= $pub ? 'You can also tell us later.' : 'More beneficiaries can be added on the client page.' ?></p>
       <div class="fields">
         <div class="f"><label for="b_name0">Full name</label><input id="b_name0" name="b_name[]" value="<?= $bv('name') ?>"></div>
-        <div class="f"><label for="b_relation0">Relationship to <?= $pub ? 'you' : 'the client' ?></label><input id="b_relation0" name="b_relation[]" value="<?= $bv('relation') ?>" placeholder="Mother, brother…"></div>
+        <div class="f"><label for="b_relation0">Relationship to <?= $you ?></label><input id="b_relation0" name="b_relation[]" value="<?= $bv('relation') ?>" placeholder="Mother, brother…"></div>
         <div class="f"><label for="b_country0">Country</label><input id="b_country0" name="b_country[]" list="countries" value="<?= $bv('country') ?>"></div>
         <div class="f"><label for="b_bank0">Bank name</label><input id="b_bank0" name="b_bank[]" value="<?= $bv('bank') ?>"></div>
         <div class="f"><label for="b_account0">Account number / IBAN</label><input id="b_account0" name="b_account[]" value="<?= $bv('account') ?>" autocomplete="off"></div>
@@ -247,5 +305,6 @@ function client_wizard(array $v, array $benefs, string $mode): void {
       <button type="button" class="btn gold" id="wizNext" hidden>Next</button>
       <button type="submit" class="btn gold" id="wizSubmit"><?= $pub ? 'Send my details' : 'Save client' ?></button>
     </div>
+    <?php if ($pub): ?><div class="draftbar"><button type="submit" class="btn ghost" name="act" value="draft" formnovalidate id="saveDraft">Save and finish later</button></div><?php endif; ?>
     <?php
 }

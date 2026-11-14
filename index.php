@@ -2,6 +2,7 @@
 require __DIR__ . '/inc/bootstrap.php';
 require __DIR__ . '/inc/layout.php';
 require __DIR__ . '/inc/clientform.php';
+require __DIR__ . '/inc/compliance.php';
 
 $u = require_login();
 csrf_check();
@@ -12,6 +13,7 @@ $pages = [
     'client_form' => ['clients.edit'], 'transfer_form' => ['transfers.create'],
     'commission' => ['commission.view'], 'submissions' => ['submissions.review'],
     'agents' => ['team.agents', 'team.staff'], 'log' => ['log.use'], 'import' => ['import'], 'roles' => ['__super'], 'insights' => ['__super'], 'mfa' => null,
+    'kyc_review' => ['kyc.decide'], 'compliance' => ['compliance.view'],
 ];
 $p = get('p', 'dashboard');
 if (!array_key_exists($p, $pages)) $p = 'dashboard';

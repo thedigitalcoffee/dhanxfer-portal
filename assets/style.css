@@ -183,3 +183,19 @@ footer{border-top:1px solid var(--line);padding:16px 24px;color:var(--muted);fon
 .legend{display:flex;gap:18px;flex-wrap:wrap;font-size:13px;color:var(--muted);margin-top:6px}
 .legend span::before{content:"";display:inline-block;width:14px;height:3px;border-radius:2px;margin-right:6px;vertical-align:middle}
 .legend .k-m::before{background:#9AA6BC}.legend .k-b::before{background:var(--info)}.legend .k-s::before{background:var(--gold)}
+/* Compliance Center sub-tabs and new intake helpers */
+nav.subtabs{display:flex;gap:6px;overflow-x:auto;margin:6px 0 14px;padding-bottom:4px;-webkit-overflow-scrolling:touch}
+nav.subtabs a{white-space:nowrap;padding:9px 12px;border:1px solid var(--line);border-radius:999px;color:var(--muted);text-decoration:none;font-weight:600;font-size:14px;min-height:40px;display:inline-flex;align-items:center;gap:6px}
+nav.subtabs a.active{color:#121212;background:var(--gold);border-color:var(--gold)}
+.badge.zero{background:var(--panel2);color:var(--muted)}
+.phone-row{display:flex;gap:8px;align-items:stretch}
+.phone-row .dial{flex:0 0 auto;display:flex;align-items:center;padding:0 12px;border:1px solid var(--line);border-radius:7px;background:var(--panel2);font-weight:600;min-width:58px;justify-content:center}
+.phone-row input{flex:1;min-width:0}
+.field-ok{color:var(--ok);font-size:13px;margin-top:4px}
+.field-bad{color:var(--bad);font-size:13px;margin-top:4px}
+.suggest{position:relative}
+.suggest-list{position:absolute;left:0;right:0;top:100%;z-index:20;background:var(--panel);border:1px solid var(--line);border-radius:8px;margin-top:4px;overflow:hidden;box-shadow:0 8px 24px rgba(0,0,0,.35)}
+.suggest-list button{display:block;width:100%;text-align:left;padding:12px;background:none;border:0;border-bottom:1px solid var(--line);color:var(--ink);font:inherit;min-height:44px;cursor:pointer}
+.suggest-list button:hover,.suggest-list button:focus{background:var(--panel2)}
+.draftbar{display:flex;justify-content:center;margin-top:10px}
+[data-show-if][hidden]{display:none!important}

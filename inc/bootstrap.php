@@ -79,7 +79,7 @@ function db(): PDO {
     return $pdo;
 }
 
-const SCHEMA_VERSION = '6';
+const SCHEMA_VERSION = '7';
 /** True when the database is at the version this code expects. */
 function schema_current(): bool {
     try { return (string)db()->query("SELECT v FROM settings WHERE k='schema_version'")->fetchColumn() === SCHEMA_VERSION; } catch (Throwable $e) { return false; }
@@ -114,7 +114,13 @@ function migrate_locked(?string $ver): void {
         ['submissions', 'app_ref', 'VARCHAR(30) NULL'], ['submissions', 'ref_verified', 'TINYINT(1) NOT NULL DEFAULT 0'],
         ['password_resets', 'purpose', "VARCHAR(20) NOT NULL DEFAULT 'reset'"],
         ['audit', 'prev_hash', 'CHAR(64) NULL'], ['audit', 'row_hash', 'CHAR(64) NULL'],
-        ['users', 'mfa_token_only', 'TINYINT(1) NOT NULL DEFAULT 0']);
+        ['users', 'mfa_token_only', 'TINYINT(1) NOT NULL DEFAULT 0'],
+        // v7: KYC review workflow, address checks, phone in international form
+        ['clients', 'phone_e164', 'VARCHAR(20) NULL'], ['clients', 'phone_region', 'CHAR(2) NULL'],
+        ['clients', 'address_source', "VARCHAR(10) NULL"], ['clients', 'id_has_address', 'TINYINT(1) NULL'],
+        ['clients', 'id_address_json', 'TEXT NULL'], ['clients', 'address_match', 'VARCHAR(20) NULL'],
+        ['clients', 'kyc_reviewed_at', 'DATETIME NULL'], ['clients', 'kyc_reviewed_by', 'INT UNSIGNED NULL'],
+        ['clients', 'kyc_next_review', 'DATE NULL'], ['submissions', 'client_id_returning', 'INT UNSIGNED NULL']);
     foreach ($cols as [$t, $c, $def]) {
         if ($def === null) continue;
         $has = db()->prepare('SELECT 1 FROM information_schema.COLUMNS WHERE TABLE_SCHEMA=DATABASE() AND TABLE_NAME=? AND COLUMN_NAME=?');
@@ -148,6 +154,17 @@ function migrate_locked(?string $ver): void {
         foreach (['compliance', 'auditor'] as $role) foreach (DEFAULT_PERMS[$role] as $perm) $ins->execute([$role, $perm]);
         $ins->execute(['super_admin', 'pii.reveal']);
     }
+    // v7: more KYC states (a review can ask for more information or escalate)
+    $kt = (string)db()->query("SELECT COLUMN_TYPE FROM information_schema.COLUMNS WHERE TABLE_SCHEMA=DATABASE() AND TABLE_NAME='clients' AND COLUMN_NAME='kyc'")->fetchColumn();
+    if ($kt !== '' && !str_contains($kt, 'Escalated')) db()->exec("ALTER TABLE clients MODIFY kyc ENUM('Pending','Verified','Rejected','Expired','Info requested','Escalated') NOT NULL DEFAULT 'Pending'");
+    if (!(int)db()->query('SELECT COUNT(*) FROM reminder_rules')->fetchColumn()) {
+        foreach ([90, 60, 30, 7, 0] as $d) foreach (['email', 'staff'] as $ch) db()->prepare('INSERT IGNORE INTO reminder_rules (offset_days, channel) VALUES (?, ?)')->execute([$d, $ch]);
+    }
+    foreach (COMPLIANCE_DEFAULTS as $k => $v) db()->prepare('INSERT IGNORE INTO settings (k, v) VALUES (?, ?)')->execute([$k, $v]);
+    if (!(int)db()->query("SELECT COUNT(*) FROM role_permissions WHERE perm='compliance.view'")->fetchColumn()) {
+        $ins = db()->prepare('INSERT IGNORE INTO role_permissions (role, perm) VALUES (?, ?)');
+        foreach (['compliance' => ['compliance.view', 'compliance.manage'], 'admin' => ['compliance.view'], 'auditor' => ['compliance.view']] as $role => $ps) foreach ($ps as $perm) $ins->execute([$role, $perm]);
+    }
     // v6: encrypted values are longer than the plain text, so these columns must be wide enough first
     // (an 80-character column could not hold a long IBAN or ID number once encrypted).
     foreach ([['clients', 'id_number', 'VARCHAR(255) NULL'], ['beneficiaries', 'account', 'VARCHAR(255) NULL'], ['users', 'mfa_secret', 'VARCHAR(255) NULL']] as [$t, $c, $def]) {
@@ -177,6 +194,9 @@ function migrate_locked(?string $ver): void {
                 if (dec((string)val("SELECT `$c` FROM `$t` WHERE id=?", [$r['id']])) !== (string)$r['v']) throw new RuntimeException("Stored value check failed in $t #{$r['id']}");
             }
         }
+        // v7: every client's ID moves into the document history; agents get their login ID as referral code
+        require_once __DIR__ . '/kyc.php';
+        kyc_migrate_v7();
         db()->prepare("REPLACE INTO settings (k, v) VALUES ('schema_version', ?)")->execute([SCHEMA_VERSION]);
         db()->commit();
     } catch (Throwable $e) { if (db()->inTransaction()) db()->rollBack(); throw $e; }
@@ -280,11 +300,19 @@ const PERMS = [
     'export' => 'Export CSV files',
     'import' => 'Import data',
     'audit.all' => "See everyone's activity history",
+    'compliance.view' => 'See the Compliance Center (KYC queue, expiring documents, reminders)',
+    'compliance.manage' => 'Request updated documents, manage reminders and compliance settings',
+];
+/** Compliance settings (changeable in the Compliance Center). Values are starting points pending compliance sign-off. */
+const COMPLIANCE_DEFAULTS = [
+    'refresh_months_low' => '36', 'refresh_months_medium' => '24', 'refresh_months_high' => '12',
+    'block_unverified' => '1', 'block_expired_doc' => '1', 'expired_grace_days' => '0', 'block_rekyc_overdue' => '1',
+    'rekyc_open_days' => '90', 'escalate_after_days' => '7', 'upload_link_days' => '7', 'reminder_max_attempts' => '3',
 ];
 const DEFAULT_PERMS = [
-    'admin' => ['clients.all', 'clients.edit', 'submissions.review', 'transfers.create', 'transfers.decide', 'rates.set', 'commission.view', 'team.agents', 'log.use', 'export', 'audit.all'],
-    'compliance' => ['clients.all', 'kyc.decide', 'pii.reveal', 'submissions.review', 'audit.all', 'export'],
-    'auditor' => ['clients.all', 'commission.view', 'audit.all', 'export'],
+    'admin' => ['clients.all', 'clients.edit', 'submissions.review', 'transfers.create', 'transfers.decide', 'rates.set', 'commission.view', 'team.agents', 'log.use', 'export', 'audit.all', 'compliance.view'],
+    'compliance' => ['clients.all', 'kyc.decide', 'pii.reveal', 'submissions.review', 'audit.all', 'export', 'compliance.view', 'compliance.manage'],
+    'auditor' => ['clients.all', 'commission.view', 'audit.all', 'export', 'compliance.view'],
     'staff' => ['clients.all', 'clients.edit', 'submissions.review', 'transfers.create', 'log.use'],
     'accountant' => ['clients.all', 'commission.view', 'export'],
 ];
@@ -485,11 +513,12 @@ function next_ref_code(): string {
 /* ---------- shared option lists ---------- */
 const OFFICES = ['Canada', 'Dubai'];
 const ID_TYPES = ['Passport', "Driver's licence", 'PR card', 'Provincial photo ID', 'Emirates ID', 'National ID', 'Other'];
-const KYC = ['Pending', 'Verified', 'Rejected', 'Expired'];
+const KYC = ['Pending', 'Verified', 'Rejected', 'Expired', 'Info requested', 'Escalated'];
 const RISK = ['Low', 'Medium', 'High'];
 const PURPOSES = ['Family support', 'Education / tuition', 'Business payment', 'Savings / investment', 'Property', 'Gift', 'Medical', 'Other'];
 const SOF = ['Salary', 'Business income', 'Savings', 'Sale of property', 'Gift / inheritance', 'Other'];
 const VOLUMES = ['Under 1,000', '1,000 – 5,000', '5,000 – 10,000', '10,000 – 25,000', 'Over 25,000'];
+const OCCUPATIONS = ['Employed', 'Self-employed', 'Student', 'Retired', 'Homemaker', 'Not working'];
 const HEARD = ['Walk-in', 'Referral', 'WhatsApp', 'Instagram / Facebook', 'Flyer', 'Website', 'Google', 'Other'];
 const SEND_CUR = ['CAD', 'AED', 'USD', 'GBP', 'EUR'];
 const RECV_CUR = ['INR', 'PKR', 'PHP', 'BDT', 'NPR', 'LKR', 'AED', 'CAD', 'USD', 'GBP', 'EUR'];
@@ -526,8 +555,35 @@ function save_id_upload(string $field): ?string {
     $name = date('Ymd') . '_' . bin2hex(random_bytes(12)) . '.' . $ext;
     $dir = ids_dir();
     if (!is_dir($dir)) mkdir($dir, 0750, true);
-    if (!move_uploaded_file($f['tmp_name'], $dir . '/' . $name)) throw new RuntimeException('The ID file could not be saved.');
+    if (!is_uploaded_file($f['tmp_name']) && PHP_SAPI !== 'cli') throw new RuntimeException('The ID file could not be saved.');
+    $plain = (string)file_get_contents($f['tmp_name']);
+    if ($plain === '' || !id_file_write($name, $plain)) throw new RuntimeException('The ID file could not be saved.');
+    @unlink($f['tmp_name']);
     return $name;
+}
+/*
+ * ID documents are stored encrypted (AES-256-GCM, own key derived from the master key, file name bound in).
+ * File format: "DXF1" + nonce + tag + ciphertext. Files saved before encryption existed are read as they are
+ * until the upgrade encrypts them.
+ */
+function id_file_write(string $name, string $plain): bool {
+    $dir = ids_dir();
+    if (!is_dir($dir)) mkdir($dir, 0750, true);
+    $tmp = $dir . '/.' . $name . '.' . bin2hex(random_bytes(4));
+    if (file_put_contents($tmp, 'DXF1' . aead_seal($plain, sec_key('files'), $name)) === false) return false;
+    @chmod($tmp, 0640);
+    return rename($tmp, $dir . '/' . $name);
+}
+function id_file_read(string $name): ?string {
+    $path = ids_dir() . '/' . basename($name);
+    if (!is_file($path)) return null;
+    $raw = (string)file_get_contents($path);
+    if (!str_starts_with($raw, 'DXF1')) return $raw; // older plain file
+    return aead_open(substr($raw, 4), sec_key('files'), basename($name));
+}
+function id_file_encrypted(string $name): bool {
+    $h = @fopen(ids_dir() . '/' . basename($name), 'rb'); if (!$h) return false;
+    $m = fread($h, 4); fclose($h); return $m === 'DXF1';
 }
 
 /**
@@ -539,6 +595,7 @@ function send_mail(string $to, string $subject, string $body, string $kind = 'no
     $to = trim($to);
     if (!filter_var($to, FILTER_VALIDATE_EMAIL) || preg_match('/[\r\n]/', $subject)) return false;
     if (($CONFIG['environment'] ?? '') === 'staging') $subject = '[STAGING] ' . $subject;
+    if (!empty($CONFIG['mail_disabled'])) { try { audit_write(null, 'email_sent', 'email', null, $kind . ' (test mode, not sent)', 'mail'); } catch (Throwable $e) {} return true; }
     $from = $CONFIG['mail_from'] ?? 'no-reply@dhanxfer.com';
     $domain = substr(strrchr($from, '@') ?: '@dhanxfer.com', 1);
     $headers = implode("\r\n", [

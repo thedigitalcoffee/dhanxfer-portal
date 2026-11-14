@@ -11,6 +11,9 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
     if (!$t || !can_see_transfer($t)) { flash('Transfer not found.', 'bad'); redirect('/?p=transfers'); }
     $note = mb_substr(post('note'), 0, 250);
     $ok = false;
+    if ($canDecide && $act === 'accept' && $t['status'] === 'pending' && $t['client_id'] && !($elig = transfer_eligibility(one('SELECT * FROM clients WHERE id=?', [$t['client_id']]) ?? ['id' => 0, 'kyc' => 'Pending']))[0]) {
+        flash('Cannot accept: ' . implode(' ', $elig[1]), 'bad'); redirect('/?p=transfers&id=' . $t['id']);
+    }
     if ($canDecide && $act === 'accept' && $t['status'] === 'pending') {
         q("UPDATE transfers SET status='accepted', decided_by=?, decided_at=NOW(), decision_note=? WHERE id=? AND status='pending'", [$u['id'], $note ?: null, $t['id']]); $ok = 'Transfer ' . $t['ref_no'] . ' accepted.';
     } elseif ($canDecide && $act === 'reject' && $t['status'] === 'pending') {

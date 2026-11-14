@@ -9,6 +9,7 @@ require __DIR__ . '/../inc/bootstrap.php';
 require __DIR__ . '/../inc/clientform.php';
 require __DIR__ . '/../inc/rates.php';
 require __DIR__ . '/../inc/mfa.php';
+require __DIR__ . '/../inc/compliance.php';
 
 $pass = 0; $fail = 0; $out = []; $finished = false;
 // If anything crashes, still write what ran, plus the error, to the report.
@@ -43,6 +44,7 @@ function mkuser(string $role, string $name, ?string $ref = null): array {
         if (in_array('settings', $tables, true) && (int)db()->query("SELECT COUNT(*) FROM settings WHERE k NOT IN ('schema_version','buy_pct','sell_pct','send_time','rates_on')")->fetchColumn() > 0) { echo "REFUSED: settings table has real settings.\n"; exit(2); }
     }
     $CONFIG['ids_dir'] = sys_get_temp_dir() . '/dx-test-ids-' . getmypid();
+    $CONFIG['mail_disabled'] = true; // tests never send real email
 })();
 function mark_test_db() { q("REPLACE INTO settings (k, v) VALUES ('db_role', 'test')"); }
 function wipe_db() { db()->exec('SET FOREIGN_KEY_CHECKS=0'); foreach (db()->query('SHOW TABLES')->fetchAll(PDO::FETCH_COLUMN) as $t) db()->exec("DROP TABLE `$t`"); }
@@ -92,6 +94,11 @@ ok(dec((string)val('SELECT account FROM beneficiaries LIMIT 1')) === '0009998887
 ok(!str_contains((string)val('SELECT data FROM submissions LIMIT 1'), 'ZZ998877') && str_contains((string)dec(val('SELECT data FROM submissions LIMIT 1')), 'ZZ998877'), 'existing online forms encrypted after upgrade');
 migrate(); // running again must change nothing
 ok(dec(val("SELECT id_number FROM clients WHERE client_no='DX-TEST-0001'")) === 'AB123456', 'upgrade is safe to run twice (no double encryption)');
+$c1doc = one("SELECT v.* FROM document_versions v JOIN clients c ON c.id=v.client_id WHERE c.client_no='DX-TEST-0001'");
+ok($c1doc && $c1doc['source'] === 'migration' && dec($c1doc['number_enc']) === 'AB123456' && (int)val("SELECT COUNT(*) FROM client_documents d JOIN clients c ON c.id=d.client_id WHERE c.client_no='DX-TEST-0001'") === 1, 'upgrade moves each existing ID into the document history (version 1), once');
+ok(agent_by_code('agent1') && (int)agent_by_code('agent1')['id'] === (int)val("SELECT id FROM users WHERE username='agent1'"), 'upgrade gives each sub-agent their login ID as referral code');
+ok(val("SELECT phone_e164 FROM clients WHERE client_no='DX-TEST-0001'") === '+14165550100', 'upgrade stores existing phone numbers in international form');
+ok((string)val("SELECT COLUMN_TYPE FROM information_schema.COLUMNS WHERE TABLE_SCHEMA=DATABASE() AND TABLE_NAME='clients' AND COLUMN_NAME='kyc'") !== '' && str_contains((string)val("SELECT COLUMN_TYPE FROM information_schema.COLUMNS WHERE TABLE_SCHEMA=DATABASE() AND TABLE_NAME='clients' AND COLUMN_NAME='kyc'"), 'Escalated'), 'KYC states extended (information requested, escalated)');
 
 // ---- 0b. backup and restore ----
 $before = db_fingerprint();
@@ -232,6 +239,152 @@ ok((float)val('SELECT commission FROM transfers WHERE id=?', [$tid]) === 250.0, 
 // ---- 9. Telegram messages carry no client data ----
 $txt = rates_table_text(['CAD>INR' => ['send' => 'CAD', 'recv' => 'INR', 'market' => 61.2, 'buy' => 63.0, 'sell' => 64.9]]);
 ok(!preg_match('/Client|P1234567|0001234/', $txt), 'rate message holds rates only');
+
+
+// ---- 10. phone numbers (libphonenumber) ----
+$pc = fn($n, $r) => phone_check($n, $r);
+ok($pc('(416) 555-0123', 'CA')['e164'] === '+14165550123' && $pc('416.555.0123', 'CA')['e164'] === '+14165550123' && $pc('1 416 555 0123', 'CA')['e164'] === '+14165550123', 'Canadian number accepted with brackets, dots, spaces or a leading 1; stored as +1…');
+ok(!$pc('416 555 012', 'CA')['ok'] && !$pc('416 555 01234', 'CA')['ok'], 'Canadian number with 9 or 11 digits refused (formatting characters are not counted)');
+ok(!$pc('123 456 7890', 'CA')['ok'], 'impossible Canadian number (area code 123) refused');
+ok($pc('613 555 0199', 'US')['ok'] && $pc('(212) 555-0187', 'US')['e164'] === '+12125550187', 'US numbers accepted');
+ok($pc('98765 43210', 'IN')['e164'] === '+919876543210' && $pc('050 123 4567', 'AE')['e164'] === '+971501234567' && $pc('0300 1234567', 'PK')['e164'] === '+923001234567', 'India, UAE and Pakistan numbers follow their own lengths');
+ok($pc('+44 7911 123456', 'CA')['ok'] && $pc('0044 7911 123456', null)['ok'], 'a number starting with + or 00 is read as international, whatever country was chosen');
+ok(!$pc('98765 4321', 'IN')['ok'] && !$pc('416555012a', 'CA')['ok'] && !$pc('4165550123', null)['ok'], 'too-short foreign numbers, letters, and numbers without a country are refused');
+ok(phone_region('United Arab Emirates') === 'AE' && phone_dial_code('CA') === '+1', 'country chosen by the client sets the expected country code');
+
+// ---- 11. address comparison ----
+$home = ['line1' => 'Unit 5, 12 Main St.', 'city' => 'Toronto', 'province' => 'Ontario', 'postal' => 'm5h 2n2', 'country' => 'Canada'];
+ok(addr_compare($home, ['line1' => '12 Main Street Apt 5', 'city' => 'toronto', 'province' => 'ON', 'postal' => 'M5H2N2', 'country' => 'CA'])['result'] === 'match', 'same address written differently counts as a match');
+ok(addr_compare($home, ['line1' => '12 Mian Street #5', 'city' => 'Torronto', 'postal' => 'M5H 2N2', 'country' => 'Canada'])['result'] === 'minor', 'small spelling slips are "minor", not a mismatch');
+ok(addr_compare($home, ['line1' => '88 King Road', 'city' => 'Brampton', 'postal' => 'L6T 1A1', 'country' => 'Canada'])['result'] === 'mismatch', 'a different address is flagged for review');
+ok(addr_compare($home, null)['result'] === 'no_id_address' && addr_needs_evidence('no_id_address') && !addr_needs_evidence('minor'), 'an ID without an address needs proof of address; minor differences do not');
+
+// ---- 12. encrypted ID images ----
+$fname = date('Ymd') . '_' . bin2hex(random_bytes(12)) . '.jpg';
+$img = "\xFF\xD8\xFF\xE0 synthetic-image Synthetic Client ID";
+ok(id_file_write($fname, $img) && id_file_read($fname) === $img, 'ID image is saved and read back exactly');
+ok(!str_contains((string)file_get_contents(ids_dir() . '/' . $fname), 'Synthetic') && id_file_encrypted($fname), 'ID image on disk is encrypted');
+$raw = (string)file_get_contents(ids_dir() . '/' . $fname); file_put_contents(ids_dir() . '/' . $fname, substr($raw, 0, -1) . chr(ord(substr($raw, -1)) ^ 1));
+ok(id_file_read($fname) === null, 'a tampered ID image is refused');
+id_file_write($fname, $img);
+
+// ---- 13. KYC review: only through the structured decision ----
+$secret = mfa_new_secret();
+q('UPDATE users SET mfa_secret=?, mfa_enabled=1 WHERE id IN (?,?)', [enc($secret), $super['id'], $comp['id']]);
+$super = one('SELECT * FROM users WHERE id=?', [$super['id']]); $comp = one('SELECT * FROM users WHERE id=?', [$comp['id']]);
+$kc = insert_client(array_merge(array_fill_keys(CLIENT_FIELDS, ''), ['name' => 'KYC Synthetic', 'phone' => '+1 416 555 0303', 'office' => 'Canada', 'dob' => '1990-01-01',
+    'address' => '12 Main Street', 'city' => 'Toronto', 'postal' => 'M5H 2N2', 'country' => 'Canada', 'id_type' => 'Passport', 'id_number' => 'KY123456', 'id_expiry' => date('Y-m-d', strtotime('+2 years')),
+    'id_has_address' => 'yes', 'id_addr_same' => 'no', 'id_addr_line1' => '88 King Road', 'id_addr_city' => 'Brampton', 'id_addr_postal' => 'L6T 1A1']), ['agent_id' => $agA['id'], 'source' => 'agent', 'id_file' => $fname]);
+$kcr = fn() => one('SELECT * FROM clients WHERE id=?', [$kc]);
+ok($kcr()['address_match'] === 'mismatch' && doc_current($kc)['version'] == 1 && doc_current($kc)['file_name'] === $fname, 'new client: ID saved as document version 1, address mismatch flagged');
+$full = ['decision' => 'approve', 'checklist' => array_keys(KYC_CHECKLIST), 'risk' => 'Low', 'notes' => 'Checked passport in person, all details match.', 'evidence' => 'scan folder 2026/11', 'screening_ref' => 'SCREEN-001', 'address_evidence' => ''];
+$code = fn() => totp_code($secret, intdiv(time(), 30));
+$reset = fn() => q('UPDATE users SET mfa_last_step=NULL WHERE id IN (?,?)', [$super['id'], $comp['id']]);
+foreach (['agent' => $agA, 'admin' => $admin, 'auditor' => $aud, 'staff' => $staff] as $who => $usr) { as_user($usr); $r = kyc_decide($kcr(), $usr, $full + ['code' => '000000']); ok(!$r[0] && $kcr()['kyc'] === 'Pending', "$who cannot approve KYC"); }
+as_user($super);
+ok(!kyc_decide($kcr(), $super, $full + ['code' => '000000'])[0], 'approval refused without a correct two-step code'); $reset();
+$r = kyc_decide($kcr(), $super, array_merge($full, ['checklist' => array_slice(array_keys(KYC_CHECKLIST), 1)]) + ['code' => $code()]); $reset();
+ok(!$r[0] && str_contains(implode(' ', $r[1]), 'checklist'), 'approval refused with an unticked checklist item');
+$r = kyc_decide($kcr(), $super, array_merge($full, ['screening_ref' => '', 'evidence' => '']) + ['code' => $code()]); $reset();
+ok(!$r[0] && str_contains(implode(' ', $r[1]), 'screening') && str_contains(implode(' ', $r[1]), 'evidence reference'), 'approval refused without screening and evidence references');
+$r = kyc_decide($kcr(), $super, $full + ['code' => $code()]); $reset();
+ok(!$r[0] && str_contains(implode(' ', $r[1]), 'proof of address'), 'mismatched address: approval needs a proof-of-address reference');
+$r = kyc_decide($kcr(), $super, array_merge($full, ['notes' => 'short']) + ['code' => $code()]); $reset();
+ok(!$r[0], 'decision refused without proper notes');
+q("UPDATE document_versions SET expires_on=DATE_SUB(CURDATE(), INTERVAL 1 DAY) WHERE client_id=?", [$kc]);
+$r = kyc_decide($kcr(), $super, array_merge($full, ['address_evidence' => 'Hydro bill']) + ['code' => $code()]); $reset();
+ok(!$r[0] && str_contains(implode(' ', $r[1]), 'expired'), 'approval refused when the ID has expired');
+q("UPDATE document_versions SET expires_on=DATE_ADD(CURDATE(), INTERVAL 2 YEAR) WHERE client_id=?", [$kc]);
+$noDoc = insert_client(array_merge(array_fill_keys(CLIENT_FIELDS, ''), ['name' => 'No Doc', 'phone' => '+1 416 555 0304', 'office' => 'Canada', 'dob' => '1991-01-01']), ['source' => 'admin']);
+$r = kyc_decide(one('SELECT * FROM clients WHERE id=?', [$noDoc]), $super, $full + ['code' => $code()]); $reset();
+ok(!$r[0] && str_contains(implode(' ', $r[1]), 'No identity document'), 'approval refused when no ID document is on file');
+[$el] = transfer_eligibility($kcr()); ok(!$el, 'transfers blocked while KYC is pending');
+$r = kyc_decide($kcr(), $super, array_merge($full, ['address_evidence' => 'Hydro bill 2026-10-02']) + ['code' => $code()]); $reset();
+$kv = $kcr(); $rev = one('SELECT * FROM kyc_reviews WHERE id=?', [(int)$r[2]]);
+ok($r[0] && $kv['kyc'] === 'Verified' && (int)$kv['kyc_reviewed_by'] === (int)$super['id'] && $rev['reviewer_role'] === 'super_admin' && str_contains((string)$rev['checklist'], 'Hydro bill'), 'super admin approves with every prerequisite; reviewer, role and evidence are recorded');
+ok(doc_current($kc)['outcome'] === 'verified' && $kv['kyc_next_review'] === date('Y-m-d', strtotime(today() . ' +36 months')), 'document marked verified; next refresh set by the risk policy (low risk: 36 months)');
+ok((int)val("SELECT COUNT(*) FROM audit WHERE action='kyc_approve' AND entity_id=?", [$kc]) === 1, 'approval written to the tamper-evident activity log');
+ok(!kyc_decide($kcr(), $super, $full + ['code' => $code()])[0], 'an already verified client cannot be approved again without a refresh case'); $reset();
+[$el] = transfer_eligibility($kcr()); ok($el, 'transfers allowed once verified with a valid ID');
+as_user($comp);
+$r = kyc_decide($kcr(), $comp, ['decision' => 'escalate', 'notes' => 'Second opinion needed on source of funds.', 'code' => $code()]); $reset();
+ok($r[0] && $kcr()['kyc'] === 'Escalated', 'compliance officer can escalate with notes');
+[$el] = transfer_eligibility($kcr()); ok(!$el, 'escalated client cannot transfer');
+
+// ---- 14. eligibility policy ----
+q("UPDATE clients SET kyc='Verified' WHERE id=?", [$kc]);
+q("UPDATE document_versions SET expires_on=DATE_SUB(CURDATE(), INTERVAL 3 DAY) WHERE client_id=?", [$kc]);
+ok(!transfer_eligibility($kcr())[0], 'expired ID blocks transfers');
+set_setting('expired_grace_days', '5'); ok(transfer_eligibility($kcr())[0], 'grace days after expiry are respected when the policy allows them');
+set_setting('expired_grace_days', '0');
+q("UPDATE document_versions SET expires_on=DATE_ADD(CURDATE(), INTERVAL 25 DAY) WHERE client_id=?", [$kc]);
+q("INSERT INTO rekyc_cases (client_id, reason, status, due_date, open_key) VALUES (?, 'manual', 'required', DATE_SUB(CURDATE(), INTERVAL 1 DAY), 'test-overdue')", [$kc]);
+ok(!transfer_eligibility($kcr())[0], 'overdue KYC refresh blocks transfers');
+q("DELETE FROM rekyc_cases WHERE open_key='test-overdue'");
+
+// ---- 15. reminders and KYC refresh cases ----
+q("UPDATE clients SET email='synthetic@example.com' WHERE id=?", [$kc]);
+$d1 = compliance_daily();
+$rem = all('SELECT event_key, channel, status FROM reminders WHERE client_id=? ORDER BY event_key, channel', [$kc]);
+$pend = array_filter($rem, fn($r) => $r['event_key'] === 'exp-30');
+$skip = array_filter($rem, fn($r) => in_array($r['event_key'], ['exp-90', 'exp-60'], true) && $r['status'] === 'skipped');
+ok(count($pend) === 2 && count($skip) === 4, 'ID expiring in 25 days: the 30-day reminder is made (email + staff); missed earlier stages are skipped, not sent late');
+ok((int)val("SELECT COUNT(*) FROM rekyc_cases WHERE client_id=? AND reason='doc_expiring'", [$kc]) === 1, 'a KYC refresh case opens for the expiring ID');
+$before = (int)val('SELECT COUNT(*) FROM reminders'); compliance_daily(); compliance_daily();
+ok((int)val('SELECT COUNT(*) FROM reminders') === $before && (int)val("SELECT COUNT(*) FROM rekyc_cases WHERE client_id=?", [$kc]) === 1, 'running the daily check again creates no duplicates');
+compliance_daily(date('Y-m-d', strtotime('+20 days')));
+ok((int)val("SELECT COUNT(*) FROM reminders WHERE client_id=? AND event_key='exp-7' AND status IN ('pending','sent')", [$kc]) === 2, 'the 7-day reminder follows when its date comes');
+$sentMails = [];
+q("UPDATE reminders SET status='pending', attempts=0, next_attempt_at=NOW() WHERE client_id=? AND event_key='exp-30' AND channel='email'", [$kc]);
+$fail1 = reminders_send(function () { return false; });
+$rr = one("SELECT * FROM reminders WHERE client_id=? AND event_key='exp-30' AND channel='email'", [$kc]);
+ok($fail1['retry'] === 1 && $rr['status'] === 'pending' && $rr['attempts'] == 1 && strtotime($rr['next_attempt_at']) > time(), 'a failed send is retried later, not dropped');
+q('UPDATE reminders SET next_attempt_at=NOW() WHERE id=?', [$rr['id']]); reminders_send(fn() => false);
+q('UPDATE reminders SET next_attempt_at=NOW() WHERE id=?', [$rr['id']]); reminders_send(fn() => false);
+ok(val('SELECT status FROM reminders WHERE id=?', [$rr['id']]) === 'failed' && (int)val('SELECT COUNT(*) FROM notification_attempts WHERE reminder_id=? AND ok=0', [$rr['id']]) === 3, 'after 3 failed attempts the reminder is marked failed; every attempt is recorded');
+q("UPDATE reminders SET status='pending', attempts=0, next_attempt_at=NOW() WHERE id=?", [$rr['id']]);
+$cap = []; reminders_send(function ($to, $sub, $body) use (&$cap) { $cap[] = $sub . ' ' . $body; return true; });
+ok(val('SELECT status FROM reminders WHERE id=?', [$rr['id']]) === 'sent' && $cap && !preg_match('/KY123456|Passport|' . date('Y') . '-/', implode(' ', $cap)), 'reminder sent; the email holds no document type, number or dates');
+q("UPDATE clients SET email=NULL WHERE id=?", [$kc]); q("UPDATE reminders SET status='pending', attempts=0, next_attempt_at=NOW() WHERE id=?", [$rr['id']]);
+reminders_send(fn() => true);
+ok(val('SELECT last_error FROM reminders WHERE id=?', [$rr['id']]) === 'No email address on file', 'no email on file: marked failed for staff to follow up');
+q("UPDATE document_versions SET expires_on=DATE_SUB(CURDATE(), INTERVAL 1 DAY) WHERE client_id=?", [$kc]);
+compliance_daily();
+ok(val("SELECT reason FROM rekyc_cases WHERE client_id=? AND status IN ('required','in_progress','escalated')", [$kc]) === 'doc_expired' && (int)val("SELECT COUNT(*) FROM reminders WHERE client_id=? AND event_key='expiry'", [$kc]) >= 1, 'on expiry the case becomes "expired" and the expiry-day alert is made');
+q("UPDATE rekyc_cases SET due_date=DATE_SUB(CURDATE(), INTERVAL 30 DAY) WHERE client_id=?", [$kc]);
+compliance_daily();
+ok(val('SELECT status FROM rekyc_cases WHERE client_id=? ORDER BY id LIMIT 1', [$kc]) === 'escalated', 'overdue refresh case is escalated');
+$pc2 = insert_client(array_merge(array_fill_keys(CLIENT_FIELDS, ''), ['name' => 'Periodic Synthetic', 'phone' => '+1 416 555 0305', 'office' => 'Canada']), ['source' => 'admin', 'kyc' => 'Verified']);
+q('UPDATE clients SET kyc_next_review=DATE_ADD(CURDATE(), INTERVAL 10 DAY) WHERE id=?', [$pc2]);
+compliance_daily();
+ok(val("SELECT reason FROM rekyc_cases WHERE client_id=?", [$pc2]) === 'periodic', 'periodic KYC refresh opens a case on its own schedule, separate from ID expiry');
+
+// ---- 16. secure upload link ----
+$link = upload_request_create($kc, (int)$super['id']);
+$tok = substr($link, strpos($link, 't=') + 2);
+$ur = upload_request_find($tok);
+ok($ur && (int)$ur['client_id'] === $kc && !str_contains($link, (string)$kc), 'upload link made; it carries a random token, not the client number');
+for ($i = 0; $i < 5; $i++) upload_request_verify(upload_request_find($tok) ?? $ur, '1990-01-01', '0000');
+ok(upload_request_find($tok) === null, 'upload link locks after 5 wrong identity checks');
+$link = upload_request_create($kc, (int)$super['id']); $tok = substr($link, strpos($link, 't=') + 2);
+ok(upload_request_verify(upload_request_find($tok), '1990-01-01', '0303'), 'the client passes with date of birth + phone digits');
+ok(upload_request_find(substr(upload_request_create($kc, (int)$super['id']), -48)) && upload_request_find($tok) === null, 'a new link cancels the older one');
+
+// ---- 17. referral codes: login ID as the code, stable agent ID ----
+foreach ([$agA, $agB] as $ag) agent_code_register((int)$ag['id'], $ag['username']);
+ok(agent_by_code(strtoupper($agA['username']))['id'] == $agA['id'], 'typed code is the sub-agent login ID (any letter case)');
+q("INSERT INTO submissions (data, name, phone, agent_id) VALUES ('x','Ref Synthetic','+1',?)", [$agA['id']]);
+$oldName = $agA['username'];
+agent_rename($agA, 'renamed.agent', (int)$super['id']);
+ok(agent_by_code($oldName)['id'] == $agA['id'] && agent_by_code('renamed.agent')['id'] == $agA['id'], 'after a rename both the new and the old code credit the same sub-agent');
+ok((int)val("SELECT agent_id FROM submissions WHERE name='Ref Synthetic'") === (int)$agA['id'], 'past referrals stay with the agent (stored by internal ID)');
+$thrown = false; try { agent_rename(one('SELECT * FROM users WHERE id=?', [$agB['id']]), $oldName, (int)$super['id']); } catch (RuntimeException $e) { $thrown = true; }
+ok($thrown && agent_by_code($oldName)['id'] == $agA['id'], "another agent cannot take a retired code (no reassignment)");
+$thrown = false; try { agent_code_register((int)$agB['id'], 'renamed.agent'); } catch (RuntimeException $e) { $thrown = true; }
+ok($thrown, 'a current code cannot be registered to a second agent');
+$ag2 = one('SELECT * FROM users WHERE id=?', [$agA['id']]);
+ok(agent_from_link((string)$agA['id'], '', agent_sig((int)$agA['id']))['id'] == $agA['id'] && agent_from_link((string)$agB['id'], '', agent_sig((int)$agA['id'])) === null, 'signed links use the internal ID and cannot be re-pointed to another agent');
+ok(str_contains(agent_link($ag2), 'a=' . $agA['id']) && agent_from_link('', 'SA-1001', ref_sig('SA-1001')) !== null, 'old SA-#### signed links keep working');
 
 $summary = sprintf("%s  %d passed, %d failed\n", date('Y-m-d H:i:s'), $pass, $fail);
 $report = $summary . implode("\n", $out) . "\n";

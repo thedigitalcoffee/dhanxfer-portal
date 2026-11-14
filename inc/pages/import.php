@@ -49,7 +49,8 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                     'purpose' => $r['Purpose'] ?? '', 'source_of_funds' => $r['Source of funds'] ?? '', 'monthly_volume' => $r['Monthly volume'] ?? '', 'destination' => $r['Destination'] ?? '',
                     'referral' => $r['Heard via'] ?? '', 'referred_by' => $r['Referred by'] ?? '',
                     'notes' => trim(($r['Notes'] ?? '') . ($agentTxt && !$agentId ? "\nSub-agent (from old panel): $agentTxt" : ''))];
-                $cid = insert_client($v, ['kyc' => in_array($r['KYC'] ?? '', KYC, true) ? $r['KYC'] : 'Pending', 'risk' => in_array($r['Risk'] ?? '', RISK, true) ? $r['Risk'] : 'Low',
+                $cid = insert_client($v, ['kyc' => 'Pending', // imported clients always start un-reviewed: KYC is decided only on the review screen
+                    'risk' => in_array($r['Risk'] ?? '', RISK, true) ? $r['Risk'] : 'Low',
                     'agent_id' => $agentId, 'source' => 'import', 'consent' => ($r['Consent'] ?? '') === 'Yes', 'created_by' => $u['id']]);
                 if ($no && preg_match('/^DX-[A-Z0-9-]{4,20}$/', $no)) q('UPDATE clients SET client_no=? WHERE id=?', [$no, $cid]);
                 $b = [];

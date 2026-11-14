@@ -6,11 +6,17 @@ if (!$c || !can_see_client($c)) { flash('Client not found.', 'bad'); redirect('/
 
 if ($_SERVER['REQUEST_METHOD'] === 'POST' && $isAdmin && post('act') !== 'reveal') {
     $act = post('act');
-    if ($act === 'kyc' && can('kyc.decide') && in_array(post('kyc'), KYC, true)) {
-        q('UPDATE clients SET kyc=?, updated_at=NOW() WHERE id=?', [post('kyc'), $c['id']]);
-        audit('kyc_' . strtolower(post('kyc')), 'client', $c['id'], $c['client_no']);
-        flash('KYC status set to ' . post('kyc') . '.');
+    if ($act === 'kyc') {
+        // the old one-click buttons are gone: KYC changes only through the review screen
+        flash('KYC decisions are made on the KYC review screen.', 'bad');
+    } elseif ($act === 'upload_link' && can('compliance.manage')) {
+        $_SESSION['upload_link'] = ['client' => (int)$c['id'], 'link' => upload_request_create((int)$c['id'], (int)me()['id'])];
+        flash('Secure upload link made. Send it to the client privately; it works once.');
     } elseif ($act === 'delete' && can('clients.delete')) {
+        if (val('SELECT 1 FROM kyc_reviews WHERE client_id=? UNION SELECT 1 FROM document_versions WHERE client_id=? LIMIT 1', [$c['id'], $c['id']])) {
+            flash('This client has KYC records, which must be kept under the record-keeping rules. It cannot be deleted.', 'bad');
+            redirect('/?p=client&id=' . $c['id']);
+        }
         q('DELETE FROM beneficiaries WHERE client_id=?', [$c['id']]);
         q('UPDATE transfers SET client_id=NULL WHERE client_id=?', [$c['id']]);
         q('DELETE FROM clients WHERE id=?', [$c['id']]);
@@ -41,16 +47,20 @@ page_head($c['name']); ?>
     <?php if (can('log.use')): ?><a class="btn" href="/?p=log&client=<?= (int)$c['id'] ?>">+ Log activity</a><?php endif; ?>
   </div>
 </div>
-<?php if (can('kyc.decide')): ?>
-<form method="post" class="card row" style="padding:12px"><?= csrf_field() ?><input type="hidden" name="act" value="kyc">
-  <span class="tag">KYC decision:</span>
-  <?php foreach (KYC as $k): if ($k === $c['kyc']) continue; ?><button class="btn sm <?= $k === 'Verified' ? 'ok' : ($k === 'Pending' ? '' : 'danger') ?>" name="kyc" value="<?= e($k) ?>">Mark <?= e($k) ?></button><?php endforeach; ?>
-</form>
+<?php if ($isAdmin): [$eligible, $why] = transfer_eligibility($c); $ul = ($_SESSION['upload_link']['client'] ?? 0) === (int)$c['id'] ? $_SESSION['upload_link']['link'] : null; unset($_SESSION['upload_link']); ?>
+<div class="card">
+  <div class="spread"><div><h3 style="margin:0 0 4px">KYC</h3>
+    <div class="tag"><?= $c['kyc_reviewed_at'] ? 'Last decision ' . fdatetime($c['kyc_reviewed_at']) . ' by ' . e((string)val('SELECT name FROM users WHERE id=?', [$c['kyc_reviewed_by']])) : 'Not reviewed yet' ?><?= $c['kyc_next_review'] ? ' · next refresh due ' . fdate($c['kyc_next_review']) : '' ?></div>
+    <div class="tag">Address: <?= e(addr_result_label($c['address_match'])) ?> · Transfers: <?= $eligible ? '<span style="color:var(--ok)">allowed</span>' : '<span style="color:var(--bad)">blocked</span> (' . e(implode(' ', $why)) . ')' ?></div></div>
+    <div class="row"><?php if (can('kyc.decide')): ?><a class="btn gold" href="/?p=kyc_review&id=<?= (int)$c['id'] ?>">Open KYC review</a><?php endif; ?>
+      <?php if (can('compliance.manage')): ?><form method="post" class="inline"><?= csrf_field() ?><button class="btn" name="act" value="upload_link">Request updated document</button></form><?php endif; ?></div></div>
+  <?php if ($ul): ?><div class="secret" style="margin-top:10px"><?= e($ul) ?></div><div class="row" style="margin-top:8px"><button type="button" class="btn sm" data-copy="<?= e($ul) ?>">Copy link</button><a class="btn sm" target="_blank" rel="noopener" href="https://wa.me/<?= e(preg_replace('/\D/', '', (string)($c['phone_e164'] ?: $c['whatsapp'] ?: $c['phone']))) ?>?text=<?= e(rawurlencode("Hello {$c['name']}, please upload your updated ID for DhanXfer with this secure link (it works once, for " . setting('upload_link_days', '7') . " days):\n$ul")) ?>">Send on WhatsApp</a></div><p class="tag">The client confirms their date of birth and phone digits before uploading.</p><?php endif; ?>
+</div>
 <?php endif; ?>
 <div class="grid2">
   <div>
     <div class="card"><h3 style="margin-bottom:10px">Contact</h3><dl class="kv"><?= kv('Phone', $c['phone']) . kv('WhatsApp', $c['whatsapp']) . kv('Email', $c['email']) . kv('Address', implode(', ', array_filter([$c['address'], $c['city'], $c['province'], $c['postal'], $c['country']]))) ?></dl></div>
-    <div class="card"><h3 style="margin-bottom:10px">Identification</h3><dl class="kv"><?= kv('Date of birth', fdate($c['dob'])) . kv('Nationality', $c['nationality']) . kv('ID type', $c['id_type']) . kv('ID number', $reveal ? $idPlain : mask($idPlain)) . kv('Issued by', $c['id_country']) . kv('Expiry', fdate($c['id_expiry'])) . kv('Consent recorded', $c['consent'] ? 'Yes' : 'No') ?>
+    <div class="card"><h3 style="margin-bottom:10px">Identification</h3><dl class="kv"><?= kv('Date of birth', fdate($c['dob'])) . kv('Nationality', $c['nationality']) . kv('ID type', $c['id_type']) . kv('ID number', $reveal ? $idPlain : mask($idPlain)) . kv('Issued by', $c['id_country']) . kv('Expiry', fdate($c['id_expiry'])) . kv('Address on ID', $c['id_has_address'] === null ? '' : ((int)$c['id_has_address'] ? (($ia = json_decode((string)$c['id_address_json'], true)) ? implode(', ', array_filter($ia)) : 'Same as home address') : 'No address on the ID')) . kv('Consent recorded', $c['consent'] ? 'Yes' : 'No') ?>
       <?php if (can('pii.reveal') && !$reveal && ($idPlain || $c['id_file'])): ?><dt></dt><dd><form method="post" class="inline"><?= csrf_field() ?><button class="linkbtn" name="act" value="reveal">Show full numbers</button></form> <span class="tag">(this is logged)</span></dd><?php endif; ?>
       <?php if ($c['id_file'] && (can('pii.reveal') || can('kyc.decide'))): ?><dt>ID document</dt><dd><a href="/file.php?f=<?= e($c['id_file']) ?>" target="_blank" rel="noopener">Open uploaded ID</a></dd><?php endif; ?></dl></div>
     <h2 style="margin:6px 0 10px">Transfers (<?= count($tx) ?>)</h2>

@@ -40,7 +40,7 @@ CREATE TABLE IF NOT EXISTS clients (
   id_country VARCHAR(80) NULL,
   id_expiry DATE NULL,
   id_file VARCHAR(120) NULL,
-  kyc ENUM('Pending','Verified','Rejected','Expired') NOT NULL DEFAULT 'Pending',
+  kyc ENUM('Pending','Verified','Rejected','Expired','Info requested','Escalated') NOT NULL DEFAULT 'Pending',
   risk ENUM('Low','Medium','High') NOT NULL DEFAULT 'Low',
   purpose VARCHAR(80) NULL,
   source_of_funds VARCHAR(80) NULL,
@@ -227,4 +227,152 @@ CREATE TABLE IF NOT EXISTS market_rates (
   source VARCHAR(40) NOT NULL DEFAULT 'open.er-api.com',
   fetched_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
   UNIQUE KEY day_pair (rate_date, send_currency, receive_currency)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+
+CREATE TABLE IF NOT EXISTS client_documents (
+  id INT UNSIGNED AUTO_INCREMENT PRIMARY KEY,
+  client_id INT UNSIGNED NOT NULL,
+  doc_kind ENUM('identity','address_proof','other') NOT NULL DEFAULT 'identity',
+  doc_type VARCHAR(40) NULL,
+  status ENUM('current','superseded') NOT NULL DEFAULT 'current',
+  current_version_id INT UNSIGNED NULL,
+  created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  INDEX (client_id, status)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+
+CREATE TABLE IF NOT EXISTS document_versions (
+  id INT UNSIGNED AUTO_INCREMENT PRIMARY KEY,
+  document_id INT UNSIGNED NOT NULL,
+  client_id INT UNSIGNED NOT NULL,
+  version INT UNSIGNED NOT NULL DEFAULT 1,
+  doc_type VARCHAR(40) NULL,
+  number_enc VARCHAR(255) NULL,
+  number_hash CHAR(64) NULL,
+  issuing_country VARCHAR(80) NULL,
+  expires_on DATE NULL,
+  has_address TINYINT(1) NULL,
+  address_json TEXT NULL,
+  file_name VARCHAR(120) NULL,
+  file_sha256 CHAR(64) NULL,
+  source ENUM('admin','agent','online','upload_link','migration') NOT NULL DEFAULT 'admin',
+  outcome ENUM('unverified','verified','rejected') NOT NULL DEFAULT 'unverified',
+  outcome_by INT UNSIGNED NULL,
+  outcome_at DATETIME NULL,
+  uploaded_by INT UNSIGNED NULL,
+  created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  UNIQUE KEY doc_ver (document_id, version),
+  INDEX (client_id), INDEX (expires_on)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+
+CREATE TABLE IF NOT EXISTS kyc_reviews (
+  id INT UNSIGNED AUTO_INCREMENT PRIMARY KEY,
+  client_id INT UNSIGNED NOT NULL,
+  case_type ENUM('initial','rekyc') NOT NULL DEFAULT 'initial',
+  rekyc_case_id INT UNSIGNED NULL,
+  document_version_id INT UNSIGNED NULL,
+  decision ENUM('approve','request_info','reject','escalate') NOT NULL,
+  checklist TEXT NULL,
+  risk VARCHAR(10) NULL,
+  address_result VARCHAR(20) NULL,
+  notes TEXT NOT NULL,
+  evidence TEXT NULL,
+  reviewer_id INT UNSIGNED NOT NULL,
+  reviewer_role VARCHAR(20) NOT NULL,
+  decided_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  INDEX (client_id, decided_at)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+
+CREATE TABLE IF NOT EXISTS rekyc_cases (
+  id INT UNSIGNED AUTO_INCREMENT PRIMARY KEY,
+  client_id INT UNSIGNED NOT NULL,
+  reason ENUM('doc_expiring','doc_expired','periodic','manual') NOT NULL,
+  document_version_id INT UNSIGNED NULL,
+  status ENUM('required','in_progress','completed','escalated','cancelled') NOT NULL DEFAULT 'required',
+  due_date DATE NULL,
+  open_key VARCHAR(80) NULL,
+  opened_by INT UNSIGNED NULL,
+  opened_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  escalated_at DATETIME NULL,
+  closed_at DATETIME NULL,
+  closed_review_id INT UNSIGNED NULL,
+  UNIQUE KEY open_key (open_key),
+  INDEX (client_id, status), INDEX (status, due_date)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+
+CREATE TABLE IF NOT EXISTS reminder_rules (
+  id INT UNSIGNED AUTO_INCREMENT PRIMARY KEY,
+  offset_days INT NOT NULL,
+  channel ENUM('email','staff') NOT NULL,
+  active TINYINT(1) NOT NULL DEFAULT 1,
+  UNIQUE KEY rule (offset_days, channel)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+
+CREATE TABLE IF NOT EXISTS reminders (
+  id INT UNSIGNED AUTO_INCREMENT PRIMARY KEY,
+  client_id INT UNSIGNED NOT NULL,
+  document_version_id INT UNSIGNED NOT NULL,
+  event_key VARCHAR(20) NOT NULL,
+  channel ENUM('email','staff') NOT NULL,
+  due_on DATE NOT NULL,
+  status ENUM('pending','sent','failed','acknowledged','skipped') NOT NULL DEFAULT 'pending',
+  attempts INT NOT NULL DEFAULT 0,
+  next_attempt_at DATETIME NULL,
+  last_error VARCHAR(160) NULL,
+  sent_at DATETIME NULL,
+  ack_at DATETIME NULL,
+  ack_by INT UNSIGNED NULL,
+  created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  UNIQUE KEY one_per_event (document_version_id, event_key, channel),
+  INDEX (status, next_attempt_at), INDEX (client_id)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+
+CREATE TABLE IF NOT EXISTS notification_attempts (
+  id INT UNSIGNED AUTO_INCREMENT PRIMARY KEY,
+  reminder_id INT UNSIGNED NOT NULL,
+  attempt_no INT NOT NULL,
+  channel VARCHAR(10) NOT NULL,
+  ok TINYINT(1) NOT NULL,
+  error VARCHAR(160) NULL,
+  at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  INDEX (reminder_id)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+
+CREATE TABLE IF NOT EXISTS upload_requests (
+  id INT UNSIGNED AUTO_INCREMENT PRIMARY KEY,
+  client_id INT UNSIGNED NOT NULL,
+  rekyc_case_id INT UNSIGNED NULL,
+  token_hash CHAR(64) NOT NULL UNIQUE,
+  expires_at DATETIME NOT NULL,
+  verify_fails INT NOT NULL DEFAULT 0,
+  verified_at DATETIME NULL,
+  used_at DATETIME NULL,
+  created_by INT UNSIGNED NULL,
+  created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  INDEX (client_id)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+
+CREATE TABLE IF NOT EXISTS intake_drafts (
+  id INT UNSIGNED AUTO_INCREMENT PRIMARY KEY,
+  token_hash CHAR(64) NOT NULL UNIQUE,
+  data MEDIUMTEXT NOT NULL,
+  phone_last4_hash CHAR(64) NOT NULL,
+  agent_id INT UNSIGNED NULL,
+  fails INT NOT NULL DEFAULT 0,
+  ip VARCHAR(45) NULL,
+  created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  updated_at DATETIME NULL,
+  expires_at DATETIME NOT NULL,
+  used_at DATETIME NULL,
+  INDEX (ip, created_at)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+
+CREATE TABLE IF NOT EXISTS agent_codes (
+  id INT UNSIGNED AUTO_INCREMENT PRIMARY KEY,
+  agent_id INT UNSIGNED NOT NULL,
+  code VARCHAR(60) NOT NULL,
+  is_current TINYINT(1) NOT NULL DEFAULT 1,
+  created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  retired_at DATETIME NULL,
+  UNIQUE KEY code (code),
+  INDEX (agent_id)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;

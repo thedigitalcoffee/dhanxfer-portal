@@ -50,6 +50,71 @@
       Array.prototype.forEach.call(tr.children, function (td, i) { if (heads[i] && !td.hasAttribute('colspan')) td.setAttribute('data-label', heads[i]); });
     });
   });
+  // Conditional questions: <div data-show-if="name=value|value2&other=x">. Hidden questions are disabled,
+  // so they are neither checked nor sent.
+  var condEls = document.querySelectorAll('[data-show-if]');
+  var fieldVals = function (form, name) {
+    var out = [];
+    form.querySelectorAll('[name="' + name + '"]').forEach(function (el) {
+      if ((el.type === 'radio' || el.type === 'checkbox') ? el.checked : true) out.push(el.value);
+    });
+    return out;
+  };
+  var applyCond = function () {
+    condEls.forEach(function (el) {
+      var form = el.closest('form') || document;
+      var show = el.getAttribute('data-show-if').split('&').every(function (part) {
+        var kv = part.split('='), want = (kv[1] || '').split('|'), have = fieldVals(form, kv[0]);
+        return have.some(function (h) { return want.indexOf(h) >= 0; });
+      });
+      el.hidden = !show;
+      el.querySelectorAll('input,select,textarea').forEach(function (i) { i.disabled = !show; });
+    });
+  };
+  if (condEls.length) { document.addEventListener('change', applyCond); applyCond(); }
+  // Phone: show the country code for the chosen country; quick check for Canada/US (10 digits). The server checks fully.
+  var ctry = document.getElementById('country'), ph = document.getElementById('phone'), dial = document.getElementById('dialShow'), dc = document.getElementById('dialCodes');
+  if (ctry && ph && dial && dc) {
+    var codes = {}; try { codes = JSON.parse(dc.textContent || '{}'); } catch (e) {}
+    var hint = document.getElementById('phoneHint');
+    var checkPhone = function () {
+      var raw = ph.value.trim(), d = raw.replace(/\D/g, ''), code = codes[ctry.value] || '';
+      dial.textContent = raw.charAt(0) === '+' ? '+' : (code || '+');
+      var msg = '';
+      if (raw && /[^0-9+\s().\-\/]/.test(raw)) msg = 'Use digits only.';
+      else if (raw && raw.charAt(0) !== '+' && code === '+1') { var n = (d.length === 11 && d.charAt(0) === '1') ? d.slice(1) : d; if (n.length !== 10) msg = 'Canadian/US numbers have 10 digits (' + n.length + ' entered).'; }
+      else if (raw && raw.charAt(0) !== '+' && !code) msg = 'Start with + and the country code.';
+      else if (raw && (d.length < 7 || d.length > 15)) msg = 'That number looks too ' + (d.length < 7 ? 'short.' : 'long.');
+      ph.setCustomValidity(msg);
+      if (hint) { hint.textContent = msg || (raw ? 'Looks right.' : 'Spaces and dashes are fine. For another country, start with + and its code.'); hint.className = msg ? 'field-bad' : (raw ? 'field-ok' : 'tag'); }
+    };
+    ctry.addEventListener('change', checkPhone); ph.addEventListener('input', checkPhone); checkPhone();
+  }
+  // Address lookup (only when the provider is switched on): pick a suggestion to fill the boxes.
+  var addr = document.querySelector('input[data-lookup="1"]'), list = document.getElementById('addrList'), src = document.getElementById('address_source');
+  if (addr && list) {
+    var tmr = null, tokEl = document.querySelector('input[name="csrf"]');
+    var fill = function (a) {
+      [['address', a.line1], ['city', a.city], ['province', a.province], ['postal', a.postal]].forEach(function (p) { var el = document.getElementById(p[0]); if (el) el.value = p[1] || ''; });
+      if (src) src.value = 'lookup';
+      list.hidden = true; list.innerHTML = '';
+    };
+    addr.addEventListener('input', function () {
+      if (src) src.value = 'manual';
+      clearTimeout(tmr);
+      var q = addr.value.trim(); if (q.length < 4) { list.hidden = true; return; }
+      tmr = setTimeout(function () {
+        fetch('/addr.php?q=' + encodeURIComponent(q) + '&country=' + encodeURIComponent(ctry ? ctry.value : ''), { headers: { 'X-CSRF': tokEl ? tokEl.value : '' }, credentials: 'same-origin' })
+          .then(function (r) { return r.ok ? r.json() : []; }).then(function (rows) {
+            list.innerHTML = '';
+            rows.forEach(function (a) { var b = document.createElement('button'); b.type = 'button'; b.textContent = a.label; b.addEventListener('click', function () { fill(a); }); list.appendChild(b); });
+            list.hidden = !rows.length;
+          }).catch(function () { list.hidden = true; });
+      }, 300);
+    });
+    ['city', 'province', 'postal'].forEach(function (k) { var el = document.getElementById(k); if (el) el.addEventListener('input', function () { if (src) src.value = 'manual'; }); });
+    document.addEventListener('click', function (e) { if (!list.contains(e.target) && e.target !== addr) list.hidden = true; });
+  }
   // Step-by-step form
   var wf = document.querySelector('form.wizard');
   if (wf) {
@@ -71,7 +136,7 @@
         if (st.hasAttribute('data-review')) return;
         var rows = '';
         st.querySelectorAll('input,select,textarea').forEach(function (el) {
-          if (el.type === 'radio' && !el.checked) return;
+          if (el.disabled || ((el.type === 'radio' || el.type === 'checkbox') && !el.checked)) return;
           var val = el.type === 'file' ? (el.files && el.files[0] ? el.files[0].name : '') : (el.tagName === 'SELECT' ? (el.value ? el.options[el.selectedIndex].text : '') : el.value);
           if (!val || el.type === 'hidden') return;
           rows += '<dt>' + esc(labelFor(el)) + '</dt><dd>' + esc(val) + '</dd>';
@@ -110,6 +175,7 @@
       if (e.key === 'Enter' && e.target.tagName === 'INPUT' && cur < steps.length - 1) { e.preventDefault(); next.click(); }
     });
     wf.addEventListener('submit', function (e) {
+      if (e.submitter && e.submitter.value === 'draft') return; // saving for later checks nothing
       for (var k = 0; k < steps.length; k++) { if (!valid(steps[k])) { e.preventDefault(); show(k); valid(steps[k]); return; } }
       submit.disabled = true; submit.textContent = 'Sending…';
     });

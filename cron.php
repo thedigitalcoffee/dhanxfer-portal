@@ -17,6 +17,13 @@ if (setting('last_anchor_date') !== today()) {
     set_setting('last_anchor_date', today());
     if ($line = audit_write_anchor()) notify('DhanXfer activity log checkpoint ' . today(), "Keep this email. It lets the portal prove later that no activity-log rows were removed.\n\n$line", 'audit_checkpoint');
 }
+// Daily compliance checks: document expiry reminders, KYC refresh cases, escalation. Pending reminders retry every run.
+require_once __DIR__ . '/inc/compliance.php';
+if (setting('last_compliance_date') !== today() && (int)date('G') >= 7) {
+    set_setting('last_compliance_date', today());
+    $c = compliance_daily();
+    echo date('c') . ' compliance: ' . json_encode($c) . "\n";
+} else { $r = reminders_send(); if ($r['sent'] || $r['failed']) echo date('c') . ' reminder retries: ' . json_encode($r) . "\n"; }
 if (setting('rates_on', '1') !== '1' || !tg_token()) exit(0);
 $sendAt = setting('send_time', '09:00');
 if (date('H:i') < $sendAt) exit(0);

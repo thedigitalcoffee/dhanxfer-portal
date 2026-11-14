@@ -32,11 +32,11 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
     $consent = post('consent') === '1';
     $agentId = $isAdmin ? ((int)post('agent_id') ?: null) : ($c ? $c['agent_id'] : (int)$u['id']);
     if ($isAdmin && $agentId && !val("SELECT 1 FROM users WHERE id=? AND role='agent'", [$agentId])) $agentId = null;
-    $kyc = can('kyc.decide') && in_array(post('kyc'), KYC, true) ? post('kyc') : ($c['kyc'] ?? 'Pending');
-    $risk = can('kyc.decide') && in_array(post('risk'), RISK, true) ? post('risk') : ($c['risk'] ?? 'Low');
-    $digits = substr(preg_replace('/\D/', '', $nv['phone']), -10);
-    if (!$errors && $digits !== '' && post('dupe_ok') !== '1') {
-        $dupe = one("SELECT id, client_no, name, agent_id FROM clients WHERE RIGHT(REGEXP_REPLACE(phone,'[^0-9]',''),10)=? AND id<>?", [$digits, $c['id'] ?? 0]);
+    // KYC status and risk never change here: only the KYC review screen decides them
+    $kyc = $c['kyc'] ?? 'Pending';
+    $risk = $c['risk'] ?? 'Low';
+    if (!$errors && !empty($nv['phone_e164']) && post('dupe_ok') !== '1') {
+        $dupe = one('SELECT id, client_no, name, agent_id FROM clients WHERE phone_e164=? AND id<>?', [$nv['phone_e164'], $c['id'] ?? 0]);
         if ($dupe) $errors[] = 'A client with this phone number already exists' . (can_see_client($dupe) ? ': ' . $dupe['name'] . ' (' . $dupe['client_no'] . ')' : '') . '. Tick "Save anyway" below if this is a different person.';
     }
     $file = null;
@@ -44,20 +44,22 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
     if (!$errors) {
         if ($c) {
             $sets = []; $par = [];
-            foreach (CLIENT_FIELDS as $k) {
-                if ($k === 'id_number') {
-                    if ($nv['id_number'] === '' && !$reveal) continue; // keep the number on file
-                    $sets[] = 'id_number=?'; $par[] = enc(nz($nv['id_number'])); $sets[] = 'id_number_hash=?'; $par[] = id_hash($nv['id_number']);
-                    continue;
-                }
-                $sets[] = "$k=?"; $par[] = nz($nv[$k]);
-            }
-            $sets[] = 'kyc=?'; $par[] = $kyc; $sets[] = 'risk=?'; $par[] = $risk;
+            $idKeys = ['id_type', 'id_number', 'id_country', 'id_expiry'];
+            foreach (CLIENT_FIELDS as $k) { if (in_array($k, $idKeys, true)) continue; $sets[] = "$k=?"; $par[] = nz($nv[$k]); }
+            foreach (['phone_e164', 'phone_region'] as $k) { $sets[] = "$k=?"; $par[] = $nv[$k] ?? null; }
             $sets[] = 'agent_id=?'; $par[] = $agentId; $sets[] = 'consent=?'; $par[] = $consent ? 1 : 0;
-            if ($file) { $sets[] = 'id_file=?'; $par[] = $file; }
             $sets[] = 'updated_at=NOW()';
             $par[] = $c['id'];
             q('UPDATE clients SET ' . implode(',', $sets) . ' WHERE id=?', $par);
+            // ID changes become a new document version (history kept); a verified client goes back to review
+            $old = ['id_type' => (string)$c['id_type'], 'id_number' => (string)dec($c['id_number']), 'id_country' => (string)$c['id_country'], 'id_expiry' => (string)$c['id_expiry']];
+            $new = ['id_type' => $nv['id_type'], 'id_number' => $nv['id_number'] === '' && !$reveal ? $old['id_number'] : $nv['id_number'], 'id_country' => $nv['id_country'], 'id_expiry' => $nv['id_expiry']];
+            $hasNew = $nv['id_has_address'] === '' ? ($c['id_has_address'] === null ? '' : ((int)$c['id_has_address'] ? 'yes' : 'no')) : $nv['id_has_address'];
+            $oldHas = $c['id_has_address'] === null ? '' : ((int)$c['id_has_address'] ? 'yes' : 'no');
+            if ($file || $new != $old || $hasNew !== $oldHas || $nv['id_addr_line1'] !== '') {
+                client_save_document((int)$c['id'], array_merge($nv, $new, ['id_has_address' => $hasNew]), $file, $isAdmin ? 'admin' : 'agent', (int)$u['id']);
+                if ($c['kyc'] === 'Verified') { q("UPDATE clients SET kyc='Pending' WHERE id=?", [$c['id']]); flash('The ID details changed, so this client needs a new KYC review.', 'warn'); }
+            }
             save_beneficiaries((int)$c['id'], $benefs);
             audit('edit_client', 'client', $c['id'], $c['client_no']);
             flash('Client details saved.');

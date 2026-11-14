@@ -14,7 +14,8 @@ function rates_strip(array $live): void {
 
 if ($u['role'] === 'agent') {
     $aid = (int)$u['id'];
-    $link = referral_link((string)$u['ref_code']);
+    require_once __DIR__ . '/../kyc.php';
+    $link = agent_link($u);
     $nClients = (int)val('SELECT COUNT(*) FROM clients WHERE agent_id=?', [$aid]);
     $nPending = (int)val("SELECT COUNT(*) FROM transfers WHERE agent_id=? AND status='pending'", [$aid]);
     $month = all("SELECT send_currency, SUM(send_amount) s, COUNT(*) n FROM transfers WHERE agent_id=? AND status IN ('accepted','completed') AND transfer_date >= DATE_FORMAT(CURDATE(),'%Y-%m-01') GROUP BY send_currency", [$aid]);
@@ -23,10 +24,10 @@ if ($u['role'] === 'agent') {
     $subs = all("SELECT name, phone, status, created_at FROM submissions WHERE agent_id=? AND status='new' ORDER BY id DESC LIMIT 20", [$aid]);
     $recent = all('SELECT t.*, c.client_no FROM transfers t LEFT JOIN clients c ON c.id=t.client_id WHERE t.agent_id=? ORDER BY t.id DESC LIMIT 10', [$aid]);
     page_head('Home'); ?>
-    <div class="spread"><div><h1>Welcome, <?= e($u['name']) ?></h1><div class="muted">Your referral ID is <strong style="color:var(--gold2)"><?= e($u['ref_code']) ?></strong></div></div>
+    <div class="spread"><div><h1>Welcome, <?= e($u['name']) ?></h1><div class="muted">Your referral code is <strong style="color:var(--gold2)"><?= e($u['username']) ?></strong></div></div>
       <div class="row"><a class="btn gold" href="/?p=client_form">+ New client</a></div></div>
     <?php rates_strip($liveRates); ?>
-    <?php share_block($link, $u['ref_code']); ?>
+    <?php share_block($link, $u['username']); ?>
     <div class="tiles">
       <a class="tile" href="/?p=clients"><div class="k">My clients</div><div class="v num"><?= $nClients ?></div></a>
       <a class="tile <?= $nPending ? 'alert' : '' ?>" href="/?p=transfers&status=pending"><div class="k">Waiting for admin</div><div class="v num"><?= $nPending ?></div><div class="s">transfer requests</div></a>

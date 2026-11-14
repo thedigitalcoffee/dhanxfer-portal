@@ -11,10 +11,30 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && post('act') !== 'reveal') {
         flash('Form from ' . $s['name'] . ' rejected.');
         redirect('/?p=submissions');
     }
+    if ($act === 'approve' && $s['client_id_returning']) {
+        // a returning client's update: apply contact changes, add the new ID as a document version for review
+        require_once __DIR__ . '/../compliance.php';
+        $d = (json_decode((string)dec($s['data']), true) ?: [])['returning_update'] ?? [];
+        $c = one('SELECT * FROM clients WHERE id=?', [$s['client_id_returning']]);
+        $chg = $d['changes'] ?? [];
+        if (in_array('address', $chg, true) && trim($d['address'] ?? '') !== '') q("UPDATE clients SET address=?, city=?, province=?, postal=?, address_source='manual', updated_at=NOW() WHERE id=?", [$d['address'], $d['city'] ?: null, $d['province'] ?: null, $d['postal'] ?: null, $c['id']]);
+        if (in_array('phone', $chg, true) && !empty($d['phone_e164'])) q('UPDATE clients SET phone=?, phone_e164=?, updated_at=NOW() WHERE id=?', [$d['phone'], $d['phone_e164'], $c['id']]);
+        if (in_array('beneficiary', $chg, true) && trim($d['b_name'] ?? '') !== '') q('INSERT INTO beneficiaries (client_id,name,country,bank,account) VALUES (?,?,?,?,?)', [$c['id'], $d['b_name'], $d['b_country'] ?: null, $d['b_bank'] ?: null, enc($d['b_account'] ?: null)]);
+        if (in_array('id', $chg, true) || in_array('address', $chg, true)) {
+            if (in_array('id', $chg, true)) client_save_document((int)$c['id'], ['id_type' => $d['id_type'] ?? '', 'id_number' => $d['id_number'] ?? '', 'id_expiry' => valid_date($d['id_expiry'] ?? '') ?? '', 'id_country' => $c['id_country']], $s['id_file'], 'online', (int)$u['id']);
+            else doc_sync_client((int)$c['id']);
+            rekyc_open((int)$c['id'], 'manual', null, date('Y-m-d', strtotime(today() . ' +30 days')), (int)$u['id'], 'update:' . $s['id']);
+        }
+        q("UPDATE submissions SET status='approved', client_id=?, reviewed_by=?, reviewed_at=NOW() WHERE id=?", [$c['id'], $u['id'], $s['id']]);
+        audit('apply_client_update', 'client', $c['id'], (string)$s['app_ref'] . ' · ' . implode(',', $chg));
+        flash('Update applied to ' . $c['name'] . (in_array('id', $chg, true) || in_array('address', $chg, true) ? '. A KYC refresh case was opened to check the new details.' : '.'));
+        redirect('/?p=client&id=' . $c['id']);
+    }
     if ($act === 'approve') {
         $d = json_decode((string)dec($s['data']), true) ?: [];
         $v = [];
         foreach (CLIENT_FIELDS as $k) $v[$k] = (string)($d[$k] ?? '');
+        foreach (['phone_e164', 'phone_region', 'address_source', 'id_has_address', 'id_addr_same', 'id_addr_line1', 'id_addr_city', 'id_addr_postal'] as $k) $v[$k] = (string)($d[$k] ?? '');
         $agentId = (int)post('agent_id') ?: null;
         if ($agentId && !val("SELECT 1 FROM users WHERE id=? AND role='agent'", [$agentId])) $agentId = null;
         $cid = insert_client($v, ['kyc' => 'Pending', 'agent_id' => $agentId, 'source' => 'online', 'consent' => !empty($d['consent']), 'id_file' => $s['id_file'], 'created_by' => $u['id']]);
@@ -34,6 +54,7 @@ if (get('id') !== '') {
     $s = one('SELECT s.*, r.name reviewer FROM submissions s LEFT JOIN users r ON r.id=s.reviewed_by WHERE s.id=?', [(int)get('id')]);
     if (!$s) { flash('Form not found.', 'bad'); redirect('/?p=submissions'); }
     $d = json_decode((string)dec($s['data']), true) ?: [];
+    if (isset($d['returning_update'])) { $ru = $d['returning_update']; $d = ['notes' => $ru['notes'] ?? '', 'consent' => $ru['consent'] ?? false, 'address' => $ru['address'] ?? '', 'city' => $ru['city'] ?? '', 'postal' => $ru['postal'] ?? '', 'phone' => $ru['phone'] ?? '', 'id_type' => $ru['id_type'] ?? '', 'id_number' => $ru['id_number'] ?? '', 'id_expiry' => $ru['id_expiry'] ?? '', 'purpose' => 'Returning client update: ' . implode(', ', $ru['changes'] ?? [])]; }
     $reveal = can('pii.reveal') && $_SERVER['REQUEST_METHOD'] === 'POST' && post('act') === 'reveal';
     audit($reveal ? 'view_pii' : 'view_submission', 'submission', $s['id'], (string)$s['app_ref'] . ($reveal ? ' · full numbers shown' : ''));
     $digits = substr(preg_replace('/\D/', '', $s['phone']), -10);
@@ -56,10 +77,10 @@ if (get('id') !== '') {
       <div>
       <?php if ($s['status'] === 'new'): ?>
         <form method="post" class="card"><?= csrf_field() ?><input type="hidden" name="id" value="<?= (int)$s['id'] ?>">
-          <h3 style="margin-bottom:10px">Add as client</h3>
+          <h3 style="margin-bottom:10px"><?= $s['client_id_returning'] ? 'Apply this update to client ' . e((string)val('SELECT client_no FROM clients WHERE id=?', [$s['client_id_returning']])) : 'Add as client' ?></h3>
           <div class="f" style="margin-bottom:12px"><label for="agent_id">Referral sub-agent</label><select id="agent_id" name="agent_id"><option value="">None (direct client)</option>
             <?php foreach ($agents as $a): ?><option value="<?= (int)$a['id'] ?>"<?= (int)$s['agent_id'] === (int)$a['id'] ? ' selected' : '' ?>><?= e($a['name'] . ' · ' . $a['ref_code']) ?></option><?php endforeach; ?></select></div>
-          <button class="btn gold" name="act" value="approve">Add as client</button>
+          <button class="btn gold" name="act" value="approve"><?= $s['client_id_returning'] ? 'Apply update' : 'Add as client' ?></button>
           <p class="tag" style="margin-bottom:0">You can edit any detail on the client page afterwards.</p></form>
         <form method="post" class="card"><?= csrf_field() ?><input type="hidden" name="id" value="<?= (int)$s['id'] ?>">
           <h3 style="margin-bottom:10px">Reject</h3>

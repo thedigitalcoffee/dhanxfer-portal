@@ -6,9 +6,10 @@ RewriteEngine On
 # Short link for clients: /register
 RewriteRule ^register/?$ register.php [L,QSA]
 RewriteRule ^status/?$ status.php [L,QSA]
+RewriteRule ^upload/?$ upload.php [L,QSA]
 # Block hidden files, the code folder and uploaded IDs from direct access
 RewriteRule (^|/)\.(?!well-known) - [F]
-RewriteRule ^(inc|storage|tests)(/|$) - [F]
+RewriteRule ^(inc|storage|tests|vendor|tools)(/|$) - [F]
 RewriteRule \.(sql|md|log|bak)$ - [F]
 </IfModule>
 

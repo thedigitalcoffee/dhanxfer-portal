@@ -26,7 +26,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
     if (!in_array($v['send_currency'], SEND_CUR, true)) $v['send_currency'] = 'CAD';
     if (!in_array($v['receive_currency'], RECV_CUR, true)) $v['receive_currency'] = 'INR';
     $status = $canDecide && in_array($v['status'], ['pending', 'accepted', 'completed'], true) ? $v['status'] : 'pending';
-    if ($c && $c['kyc'] === 'Rejected') $errors[] = 'This client\'s KYC was rejected. Transfers cannot be created for them.';
+    if ($c) { require_once __DIR__ . '/../kyc.php'; [$okElig, $why] = transfer_eligibility(one('SELECT * FROM clients WHERE id=?', [$c['id']])); if (!$okElig) $errors[] = 'Transfers are not allowed for this client yet: ' . implode(' ', $why); }
     if (!$errors) {
         $ref = new_transfer_no();
         q('INSERT INTO transfers (ref_no,client_id,client_name,agent_id,beneficiary,send_amount,send_currency,rate,receive_amount,receive_currency,fee,payment_method,office,transfer_date,status,receipt_no,notes,requested_by,decided_by,decided_at) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)', [

@@ -19,14 +19,14 @@ function page_head(string $title, bool $public = false): void {
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
 <link href="https://fonts.googleapis.com/css2?family=Lora:wght@500;600;700&family=Source+Sans+3:wght@400;500;600;700&display=swap" rel="stylesheet">
-<link rel="stylesheet" href="/assets/style.css?v=4">
+<link rel="stylesheet" href="/assets/style.css?v=5">
 </head>
 <body class="<?= $public ? 'public' : 'app' ?><?= $u && $u['role'] === 'agent' && !$public ? ' agent' : '' ?>">
 <?php global $CONFIG; if (($CONFIG['environment'] ?? 'live') === 'staging'): ?><div style="background:#7A2E00;color:#FFE3B8;text-align:center;padding:6px;font-weight:700;font-size:13px">STAGING · test system · not real data</div><?php endif; ?>
 <header class="top">
   <a class="brand" href="/"><span class="wordmark">Dhan<b>X</b>fer</span><small><?= $public ? 'Client registration' : ($u && $u['role'] === 'agent' ? 'Sub-agent portal' : 'Team portal') ?></small></a>
   <?php if ($u && !$public): ?>
-  <div class="who"><span><?= e($u['name']) ?></span><span class="pill <?= $u['role'] === 'agent' ? 'p-info' : 'p-gold' ?>"><?= $u['role'] === 'agent' ? 'Sub-agent ' . e($u['ref_code']) : e(role_label($u['role'])) ?></span>
+  <div class="who"><span><?= e($u['name']) ?></span><span class="pill <?= $u['role'] === 'agent' ? 'p-info' : 'p-gold' ?>"><?= $u['role'] === 'agent' ? 'Sub-agent ' . e($u['username']) : e(role_label($u['role'])) ?></span>
     <a href="/?p=account">My account</a>
     <form method="post" action="/logout.php" class="inline"><?= csrf_field() ?><button class="linkbtn">Log out</button></form></div>
   <?php endif; ?>
@@ -37,7 +37,7 @@ function page_head(string $title, bool $public = false): void {
         $items = ['dashboard' => 'Home', 'rates' => "Today's rates", 'clients' => 'My clients', 'transfers' => 'My transfers', 'commission' => 'My commission', 'audit' => 'My activity', 'client_form' => '+ New client'];
     } else {
         $all = ($u['role'] === 'super_admin' ? ['insights' => ['Overview', '__super']] : []) + ['dashboard' => [$u['role'] === 'super_admin' ? "Today's operations" : 'Today', null], 'transfers' => ['Transfers', null], 'rates' => ['Rates', null], 'clients' => ['Clients', 'clients.all'],
-            'submissions' => ['Online forms', 'submissions.review'], 'commission' => ['Commission', 'commission.view'], 'log' => ['Daily log', 'log.use'],
+            'submissions' => ['Online forms', 'submissions.review'], 'compliance' => ['Compliance', 'compliance.view'], 'commission' => ['Commission', 'commission.view'], 'log' => ['Daily log', 'log.use'],
             'agents' => ['Team & sub-agents', ['team.agents', 'team.staff']], 'roles' => ['Roles', '__super'], 'audit' => ['Activity history', null], 'import' => ['Import', 'import']];
         $items = [];
         foreach ($all as $k => [$label, $perm]) {
@@ -48,6 +48,7 @@ function page_head(string $title, bool $public = false): void {
     $badges = [];
     if (can('transfers.decide')) $badges['transfers'] = (int)val("SELECT COUNT(*) FROM transfers WHERE status='pending'");
     if (can('submissions.review')) $badges['submissions'] = (int)val("SELECT COUNT(*) FROM submissions WHERE status='new'");
+    if (can('compliance.view')) $badges['compliance'] = (int)val("SELECT COUNT(*) FROM clients WHERE kyc IN ('Pending','Info requested','Escalated')") + (int)val("SELECT COUNT(*) FROM rekyc_cases WHERE status='escalated'");
 ?>
 <nav class="tabs">
   <?php foreach ($items as $k => $label): ?>
@@ -78,7 +79,7 @@ function page_foot(): void { ?>
   <span>Info@dhanxfer.com</span>
   <a href="https://www.dhanxfer.com">www.dhanxfer.com</a>
 </footer>
-<script src="/assets/app.js?v=4"></script>
+<script src="/assets/app.js?v=5"></script>
 </body>
 </html>
 <?php }

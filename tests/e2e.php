@@ -34,6 +34,15 @@ class Browser {
     }
     function csrf(): string { return preg_match('/name="csrf" value="([a-f0-9]+)"/', $this->body, $m) ? $m[1] : ''; }
     function post(string $path, array $fields): string { $this->req($path); return $this->req($path, $fields + ['csrf' => $this->csrf()]); }
+    /** Form post with a file (multipart). $file = [field, path, mime]. */
+    function upload(string $path, array $fields, array $file): string {
+        global $BASE;
+        $ch = curl_init($BASE . $path);
+        $fields[$file[0]] = new CURLFile($file[1], $file[2], 'id.jpg');
+        curl_setopt_array($ch, [CURLOPT_RETURNTRANSFER => true, CURLOPT_POST => true, CURLOPT_POSTFIELDS => $fields, CURLOPT_COOKIEJAR => $this->jar, CURLOPT_COOKIEFILE => $this->jar, CURLOPT_FOLLOWLOCATION => true, CURLOPT_TIMEOUT => 30]);
+        $this->body = (string)curl_exec($ch); $this->code = (int)curl_getinfo($ch, CURLINFO_HTTP_CODE); curl_close($ch);
+        return $this->body;
+    }
     function login(string $user, ?string $pw = null, bool $code = true): string {
         global $T;
         $this->req('/login.php');
@@ -45,7 +54,7 @@ class Browser {
     }
 }
 
-$SNAP = [];
+$SNAP = []; $E2E_FILES = [];
 function snap(string $k, string $h): void { global $SNAP; $SNAP[$k] = $h; }
 function shell_exec_safe(string $cmd): ?string {
     if ($cmd === '') return '';
@@ -61,6 +70,13 @@ function e2e_cleanup(): void {
     q("DELETE FROM submissions WHERE phone IN ('+1 416 555 7009','+1 416 555 7010')");
     q("DELETE FROM transfers WHERE ref_no='E2E-T2'"); q("DELETE FROM clients WHERE name IN ('E2E Client One','E2E Client Two')");
     q("DELETE FROM users WHERE username IN ('e2e.legacy','e2e.staffx','e2e.v2owner')"); q('DELETE FROM login_attempts');
+    $ids = array_column(all("SELECT id FROM clients WHERE name LIKE 'E2E %'"), 'id');
+    if ($ids) { $in = implode(',', array_map('intval', $ids));
+        foreach (['document_versions', 'client_documents', 'kyc_reviews', 'rekyc_cases', 'reminders', 'upload_requests', 'beneficiaries'] as $t) q("DELETE FROM $t WHERE client_id IN ($in)");
+        q("DELETE FROM transfers WHERE client_id IN ($in)"); q("DELETE FROM clients WHERE id IN ($in)"); }
+    q("DELETE FROM submissions WHERE name LIKE 'E2E %'"); q("DELETE FROM intake_drafts WHERE ip IS NOT NULL AND created_at > (NOW() - INTERVAL 1 DAY)");
+    q("UPDATE users SET role='admin' WHERE username='test.admin'");
+    global $E2E_FILES; foreach ($E2E_FILES ?? [] as $f) @unlink(ids_dir() . '/' . basename($f));
     q("UPDATE users SET role='admin' WHERE username='test.admin'"); q("DELETE FROM settings WHERE k='owner_claim'");
 }
 e2e_cleanup(); // leftovers from an interrupted run
@@ -95,7 +111,7 @@ foreach (['agents', 'submissions', 'insights', 'roles', 'import', 'log'] as $pg)
 $ag->req('/file.php?f=20261114_' . str_repeat('a', 24) . '.jpg', null, false); ok($ag->code === 403, 'sub-agent cannot open ID documents', (string)$ag->code);
 $ag->req('/?p=audit'); ok(!str_contains($ag->body, 'test.agent2') && !str_contains($ag->body, 'Test Agent Two'), "sub-agent activity page shows only their own actions");
 $ag->req('/'); ok(str_contains($ag->body, 'class="bottombar"') && str_contains($ag->body, 'width=device-width'), 'sub-agent gets the mobile app layout (bottom bar, mobile viewport)');
-ok(preg_match('/register\?ref=SA-9001&amp;s=[a-f0-9]{16}/', $ag->body) === 1, 'sub-agent share link is signed');
+ok(preg_match('/register\?a=\d+&amp;s=[a-f0-9]{16}/', $ag->body) === 1, 'sub-agent share link is signed');
 
 // ---- 3. admin login needs two-step; no session from password alone ----
 fresh_step_wait();
@@ -110,7 +126,7 @@ $ad->req('/?p=clients'); ok(str_contains($ad->body, 'E2E Client Two'), 'admin wi
 $ad2 = new Browser(); $ad2->req('/login.php'); $ad2->req('/login.php', ['csrf' => $ad2->csrf(), 'username' => 'test.admin', 'password' => $T['test.admin']['password']]); $ad2->req('/mfa.php', ['csrf' => $ad2->csrf(), 'code' => $code]);
 $ad2->req('/?p=clients', null, false); ok(!str_contains($ad2->body, 'E2E Client Two'), 'the same code cannot be used again in another browser (replay)');
 $ad->req("/?p=client&id=$c2"); ok(str_contains($ad->body, '•••• 2222') && !str_contains($ad->body, 'E2E22222'), 'admin sees the ID number masked');
-$ad->post('/?p=transfers', ['id' => $t2, 'act' => 'accept']); ok(val('SELECT status FROM transfers WHERE id=?', [$t2]) === 'accepted', 'admin can accept a transfer');
+$ad->post('/?p=transfers', ['id' => $t2, 'act' => 'accept']); ok(val('SELECT status FROM transfers WHERE id=?', [$t2]) === 'pending', 'admin cannot accept a transfer for a client whose KYC is not approved (policy enforced on the server)');
 
 // ---- 4. read-only auditor and staff ----
 $au = new Browser(); $au->login('test.auditor');
@@ -124,7 +140,8 @@ $st->post('/?p=transfers', ['id' => $t2, 'act' => 'accept']); ok(val('SELECT sta
 $st->req('/?p=agents'); ok(!str_contains($st->body, 'Team &amp; sub-agents</h1>'), 'operations staff cannot manage the team');
 fresh_step_wait();
 $co = new Browser(); $co->login('test.compliance');
-$co->post("/?p=client&id=$c1", ['act' => 'kyc', 'kyc' => 'Verified']); ok(val('SELECT kyc FROM clients WHERE id=?', [$c1]) === 'Verified', 'compliance officer can verify KYC');
+$co->post("/?p=client&id=$c1", ['act' => 'kyc', 'kyc' => 'Verified']); ok(val('SELECT kyc FROM clients WHERE id=?', [$c1]) === 'Pending', 'the old one-click "Verify KYC" no longer changes anything');
+$co->req("/?p=client&id=$c1"); ok(!str_contains($co->body, 'Mark Verified') && str_contains($co->body, 'Open KYC review'), 'client page shows "Open KYC review" instead of one-click buttons');
 $co->post("/?p=client&id=$c2", ['act' => 'reveal']); ok(str_contains($co->body, 'E2E22222'), 'compliance can reveal the full ID number');
 ok((int)val("SELECT COUNT(*) FROM audit WHERE action='view_pii' AND entity_id=?", [$c2]) >= 1, 'revealing the full number is logged');
 
@@ -157,17 +174,17 @@ $cl2 = new Browser(); $cl2->req('/install.php', null, false); ok($cl2->code === 
 // ---- 6. public form and referral ----
 $pf = new Browser(); $sig = ref_sig('SA-9001');
 $pf->req("/register?ref=SA-9001&s=$sig"); ok(str_contains($pf->body, 'referred by DhanXfer agent'), 'signed agent link locks the referral');
-$pf->req('/register', ['csrf' => $pf->csrf(), 'name' => 'E2E Public', 'phone' => '+1 416 555 7009', 'office' => 'Canada', 'consent' => '1', 'ref_code' => 'SA-9002']);
-$sub = one("SELECT * FROM submissions WHERE phone='+1 416 555 7009' ORDER BY id DESC");
-ok($sub && $sub['ref_code'] === 'SA-9001' && (int)$sub['ref_verified'] === 1 && (int)$sub['agent_id'] === (int)$a1['id'], 'posting a different code cannot change a signed referral');
+$pf->req('/register', ['csrf' => $pf->csrf(), 'name' => 'E2E Public', 'phone' => '+1 416 555 7009', 'country' => 'Canada', 'consent' => '1', 'ref_code' => 'SA-9002']);
+$sub = one("SELECT * FROM submissions WHERE name='E2E Public' ORDER BY id DESC");
+ok($sub && $sub['ref_code'] === 'test.agent1' && (int)$sub['ref_verified'] === 1 && (int)$sub['agent_id'] === (int)$a1['id'], 'posting a different code cannot change a signed referral');
 ok($sub && str_starts_with((string)$sub['data'], 'enc:v1:'), 'online form stored encrypted');
 preg_match('/DXA-[0-9A-Z-]+/', $pf->body, $m); $ref = $m[0] ?? '';
 ok($ref !== '', 'client gets an application reference', substr(strip_tags($pf->body), 0, 200));
 $sp = new Browser(); $sp->req('/status'); $sp->req('/status', ['csrf' => $sp->csrf(), 'ref' => $ref, 'last4' => '7009']);
 ok(str_contains($sp->body, 'Received') && !str_contains($sp->body, 'KYC') && !str_contains($sp->body, 'risk'), 'status page shows a plain status, no KYC or risk details');
 $sp->req('/status', ['csrf' => $sp->csrf(), 'ref' => $ref, 'last4' => '0000']); ok(str_contains($sp->body, 'could not find'), 'wrong phone digits reveal nothing');
-$pt = new Browser(); $pt->req('/register?ref=SA-9002&s=0000000000000000'); $pt->req('/register', ['csrf' => $pt->csrf(), 'name' => 'E2E Tampered', 'phone' => '+1 416 555 7010', 'office' => 'Canada', 'consent' => '1', 'ref_code' => 'SA-9002']);
-$sub2 = one("SELECT * FROM submissions WHERE phone='+1 416 555 7010'");
+$pt = new Browser(); $pt->req('/register?ref=SA-9002&s=0000000000000000'); $pt->req('/register', ['csrf' => $pt->csrf(), 'name' => 'E2E Tampered', 'phone' => '+1 416 555 7010', 'country' => 'Canada', 'consent' => '1', 'ref_code' => 'SA-9002']);
+$sub2 = one("SELECT * FROM submissions WHERE name='E2E Tampered' ORDER BY id DESC");
 ok($sub2 && (int)$sub2['ref_verified'] === 0 && $sub2['agent_id'] === null, 'a tampered or typed code is kept but never credited automatically');
 
 
@@ -270,6 +287,98 @@ $vc->req('/mfa_setup.php'); $vc->req('/mfa_setup.php', ['csrf' => $vc->csrf(), '
 ok(val('SELECT role FROM users WHERE id=?', [$v2]) === 'super_admin' && (int)val('SELECT mfa_enabled FROM users WHERE id=?', [$v2]) === 1, 'after the code the v2 admin is super admin with two-step login');
 $vc2 = new Browser(); $vc2->req('/install.php', null, false); ok($vc2->code === 404, 'install page closes after the claim');
 q('DELETE FROM users WHERE id=?', [$v2]); q("DELETE FROM settings WHERE k='owner_claim'");
+
+// ---- 12. KYC review, Compliance Center, new intake (staging, synthetic data) ----
+require_once __DIR__ . '/../inc/compliance.php';
+$img = sys_get_temp_dir() . '/e2e-id-' . getmypid() . '.jpg';
+file_put_contents($img, base64_decode('/9j/4AAQSkZJRgABAQEASABIAAD/2wBDAP//////////////////////////////////////////////////////////////////////////////////////wgALCAABAAEBAREA/8QAFBABAAAAAAAAAAAAAAAAAAAAAP/aAAgBAQABPxA='));
+$fn = date('Ymd') . '_' . bin2hex(random_bytes(12)) . '.jpg'; id_file_write($fn, (string)file_get_contents($img)); $E2E_FILES[] = $fn;
+$kc = insert_client(array_merge(array_fill_keys(CLIENT_FIELDS, ''), ['name' => 'E2E KYC Person', 'phone' => '+1 416 555 7020', 'office' => 'Canada', 'dob' => '1988-02-03',
+    'address' => '12 Main Street', 'city' => 'Toronto', 'postal' => 'M5H 2N2', 'country' => 'Canada', 'id_type' => 'Passport', 'id_number' => 'E2EKYC77', 'id_expiry' => date('Y-m-d', strtotime('+3 years')),
+    'id_has_address' => 'no']), ['agent_id' => $a1['id'], 'source' => 'agent', 'id_file' => $fn]);
+q('UPDATE clients SET phone_e164=? WHERE id=?', ['+14165557020', $kc]);
+ok(val('SELECT address_match FROM clients WHERE id=?', [$kc]) === 'no_id_address', 'ID without an address is flagged for proof of address');
+ok(id_file_encrypted($fn) && !str_contains((string)file_get_contents(ids_dir() . '/' . $fn), 'JFIF'), 'ID image is stored encrypted on the server');
+$ag12 = new Browser(); $ag12->login('test.agent1');
+$ag12->req("/?p=kyc_review&id=$kc"); ok(!str_contains($ag12->body, 'Record decision'), 'sub-agent cannot open the KYC review');
+$ag12->req('/?p=compliance'); ok(!str_contains($ag12->body, '<h1>Compliance Center'), 'sub-agent cannot open the Compliance Center');
+$au12 = new Browser(); $au12->login('test.auditor');
+$au12->req('/?p=compliance'); ok(str_contains($au12->body, 'Compliance Center') && str_contains($au12->body, 'E2E KYC Person'), 'read-only auditor can see the Compliance Center queue');
+$au12->req("/?p=kyc_review&id=$kc"); ok(!str_contains($au12->body, 'Record decision'), 'auditor cannot open the KYC decision screen');
+$au12->post('/?p=compliance&v=policy', ['act' => 'policy', 'refresh_months_low' => '99']); ok(setting('refresh_months_low') !== '99', 'auditor cannot change compliance settings');
+$au12->req('/file.php?f=' . $fn, null, false); ok($au12->code === 403, 'auditor cannot open ID images');
+// super admin decides (test.admin promoted for this test only)
+q("UPDATE users SET role='super_admin' WHERE username='test.admin'");
+fresh_step_wait();
+$sa12 = new Browser(); $sa12->login('test.admin'); $sa12->req("/?p=kyc_review&id=$kc");
+ok(str_contains($sa12->body, 'Record decision') && str_contains($sa12->body, 'Sanctions / PEP') && str_contains($sa12->body, 'Approve') && str_contains($sa12->body, 'Request more information') && str_contains($sa12->body, 'Escalate'), 'super admin sees the structured review: checklist, screening, four decisions');
+snap('kyc_review', $sa12->body);
+$sa12->req('/file.php?f=' . $fn, null, false); ok($sa12->code === 200 && str_starts_with($sa12->body, "\xFF\xD8"), 'super admin opens the ID image (decrypted on the fly, logged)');
+$full12 = ['act' => 'decide', 'decision' => 'approve', 'checklist' => array_keys(KYC_CHECKLIST), 'risk' => 'Low', 'notes' => 'E2E: passport seen, details match, screening clear.', 'evidence' => 'E2E evidence folder', 'screening_ref' => 'E2E-SCREEN-1', 'address_evidence' => ''];
+$sa12->post("/?p=kyc_review&id=$kc", array_merge($full12, ['code' => '']));
+ok(val('SELECT kyc FROM clients WHERE id=?', [$kc]) === 'Pending' && str_contains($sa12->body, 'two-step code'), 'approval without the two-step code is refused');
+$sa12->post("/?p=kyc_review&id=$kc", array_merge($full12, ['code' => totp_code($T['test.admin']['mfa_secret'], intdiv(time(), 30))]));
+ok(val('SELECT kyc FROM clients WHERE id=?', [$kc]) === 'Pending' && str_contains($sa12->body, 'proof of address'), 'approval refused: ID has no address and no proof of address was recorded');
+fresh_step_wait();
+$sa12->post("/?p=kyc_review&id=$kc", array_merge($full12, ['address_evidence' => 'E2E bank statement Oct 2026', 'code' => totp_code($T['test.admin']['mfa_secret'], intdiv(time(), 30))]));
+$rv12 = one('SELECT * FROM kyc_reviews WHERE client_id=? ORDER BY id DESC', [$kc]);
+ok(val('SELECT kyc FROM clients WHERE id=?', [$kc]) === 'Verified' && $rv12 && $rv12['reviewer_role'] === 'super_admin' && $rv12['decision'] === 'approve', 'super admin approves through the review screen; decision, reviewer and role recorded');
+q("INSERT INTO transfers (ref_no, client_id, client_name, agent_id, send_amount, send_currency, receive_currency, transfer_date, status, requested_by) VALUES ('E2E-T12',?,?,?,50,'CAD','INR',CURDATE(),'pending',?)", [$kc, 'E2E KYC Person', $a1['id'], $a1['id']]);
+$t12 = (int)db()->lastInsertId();
+$sa12->post('/?p=transfers', ['id' => $t12, 'act' => 'accept']); ok(val('SELECT status FROM transfers WHERE id=?', [$t12]) === 'accepted', 'a transfer for the verified client can now be accepted');
+$sa12->req('/?p=compliance&v=completed'); snap('compliance_center', $sa12->body);
+// compliance requests an updated document; the client uploads it through the secure link
+$co12 = new Browser(); fresh_step_wait(); $co12->login('test.compliance');
+$co12->post("/?p=client&id=$kc", ['act' => 'upload_link']);
+preg_match('#/upload\?t=([a-f0-9]{48})#', $co12->body, $um);
+ok(!empty($um[1]), 'compliance makes a secure upload link from the client page');
+$cl12 = new Browser(); $cl12->req('/upload?t=' . ($um[1] ?? 'x'));
+$cl12->req('/upload', ['csrf' => $cl12->csrf(), 'act' => 'verify', 't' => $um[1] ?? '', 'dob' => '1988-02-03', 'last4' => '0000']);
+ok(str_contains($cl12->body, 'do not match'), 'upload link: wrong phone digits refused');
+$cl12->req('/upload', ['csrf' => $cl12->csrf(), 'act' => 'verify', 't' => $um[1] ?? '', 'dob' => '1988-02-03', 'last4' => '7020']);
+ok(str_contains($cl12->body, 'Upload your current ID'), 'upload link: client passes with date of birth + phone digits');
+$cl12->upload('/upload', ['csrf' => $cl12->csrf(), 'act' => 'upload', 't' => $um[1] ?? '', 'id_type' => 'Passport', 'id_number' => 'E2EKYC88', 'id_country' => 'Canada', 'id_expiry' => date('Y-m-d', strtotime('+5 years')), 'id_has_address' => 'no'], ['id_file', $img, 'image/jpeg']);
+$dv12 = doc_current($kc);
+ok(str_contains($cl12->body, 'received securely') && (int)$dv12['version'] === 2 && $dv12['source'] === 'upload_link' && $dv12['outcome'] === 'unverified', 'client uploads a new ID: saved as version 2, waiting for review');
+if ($dv12['file_name']) $E2E_FILES[] = $dv12['file_name'];
+ok((int)val('SELECT COUNT(*) FROM document_versions WHERE client_id=?', [$kc]) === 2 && val("SELECT status FROM rekyc_cases WHERE client_id=? ORDER BY id DESC LIMIT 1", [$kc]) === 'in_progress', 'the first version is kept as history; the refresh case is in progress');
+$cl12b = new Browser(); $cl12b->req('/upload?t=' . ($um[1] ?? 'x')); ok(str_contains($cl12b->body, 'Link not available'), 'upload link works only once');
+// public form: phone rules, address on ID, drafts, referral by login ID
+$pf12 = new Browser(); $pf12->req('/register?a=' . $a1['id'] . '&s=' . agent_sig((int)$a1['id']));
+ok(str_contains($pf12->body, 'referred by DhanXfer agent <strong>test.agent1'), 'signed agent link shows the login ID as the referral code');
+snap('register_new', $pf12->body);
+$pf12->req('/register', ['csrf' => $pf12->csrf(), 'name' => 'E2E Phone', 'country' => 'Canada', 'phone' => '416 555 701', 'consent' => '1']);
+ok(str_contains($pf12->body, '10 digits'), 'Canadian number with 9 digits refused with a clear message');
+$pf12->req('/register', ['csrf' => $pf12->csrf(), 'name' => 'E2E Phone', 'country' => 'Canada', 'phone' => '(416) 555-7021', 'consent' => '1', 'wa_same' => 'yes',
+    'id_type' => 'Passport', 'id_number' => 'E2EADDR1', 'id_expiry' => date('Y-m-d', strtotime('+2 years')), 'address' => '12 Main Street', 'city' => 'Toronto', 'postal' => 'M5H 2N2',
+    'id_has_address' => 'yes', 'id_addr_same' => 'no', 'id_addr_line1' => '88 King Road', 'id_addr_city' => 'Brampton', 'id_addr_postal' => 'L6T 1A1', 'occupation' => 'Student', 'employer' => 'Should Be Dropped']);
+$sd = one("SELECT * FROM submissions WHERE name='E2E Phone' ORDER BY id DESC");
+$sdd = $sd ? json_decode((string)dec($sd['data']), true) : [];
+ok($sd && ($sdd['phone_e164'] ?? '') === '+14165557021' && (int)$sd['agent_id'] === (int)$a1['id'], 'valid number stored in international form; referral credited by agent ID');
+ok(($sdd['id_addr_city'] ?? '') === 'Brampton' && ($sdd['employer'] ?? 'x') === '' && ($sdd['office'] ?? '') === 'Canada', 'ID address kept; hidden questions ignored (employer for a student); office follows the country');
+$dr = new Browser(); $dr->req('/register');
+$dr->req('/register', ['csrf' => $dr->csrf(), 'act' => 'draft', 'name' => 'E2E Draft Person', 'country' => 'Canada', 'phone' => '416 555 7022', 'city' => 'Ottawa']);
+preg_match('#/register\?draft=([a-f0-9]{48})#', $dr->body, $dm);
+ok(!empty($dm[1]) && str_contains($dr->body, 'Saved for later'), 'save and finish later gives a private link');
+$dr2 = new Browser(); $dr2->req('/register?draft=' . ($dm[1] ?? 'x'));
+ok(str_contains($dr2->body, 'Last 4 digits') && !str_contains($dr2->body, 'E2E Draft Person'), 'the link alone shows nothing: it asks for the phone digits');
+$dr2->req('/register', ['csrf' => $dr2->csrf(), 'act' => 'resume', 'draft' => $dm[1] ?? '', 'last4' => '1111']);
+ok(str_contains($dr2->body, 'do not match') && !str_contains($dr2->body, 'E2E Draft Person'), 'wrong digits: draft stays closed');
+$dr2->req('/register', ['csrf' => $dr2->csrf(), 'act' => 'resume', 'draft' => $dm[1] ?? '', 'last4' => '7022']);
+ok(str_contains($dr2->body, 'value="E2E Draft Person"') && str_contains($dr2->body, 'value="Ottawa"'), 'right digits: the form comes back filled in');
+q("UPDATE intake_drafts SET fails=5 WHERE token_hash=?", [hash('sha256', $dm[1] ?? '')]);
+$dr3 = new Browser(); $dr3->req('/register?draft=' . ($dm[1] ?? 'x')); ok(str_contains($dr3->body, 'locked after too many'), 'after 5 wrong tries the draft is locked');
+$ret = new Browser(); $ret->req('/register?returning=1');
+$ret->req('/register', ['csrf' => $ret->csrf(), 'act' => 'returning', 'client_no' => (string)val('SELECT client_no FROM clients WHERE id=?', [$kc]), 'dob' => '1988-02-03', 'last4' => '7020']);
+ok(str_contains($ret->body, 'Welcome back') && !str_contains($ret->body, 'E2EKYC') && !str_contains($ret->body, '12 Main Street'), 'returning client is recognised and sees only masked hints');
+snap('returning', $ret->body);
+// referral code = login ID; renaming keeps attribution
+$ad12 = $sa12; $ad12->post('/?p=agents', ['id' => $a1['id'], 'act' => 'rename', 'new_username' => 'test.agent1x']);
+ok(val('SELECT username FROM users WHERE id=?', [$a1['id']]) === 'test.agent1x' && (int)agent_by_code('test.agent1')['id'] === (int)$a1['id'], 'sub-agent renamed: the old code still credits the same agent');
+$ad12->post('/?p=agents', ['id' => $a2['id'], 'act' => 'rename', 'new_username' => 'test.agent1']);
+ok(val('SELECT username FROM users WHERE id=?', [$a2['id']]) === 'test.agent2', "another sub-agent cannot take the old code");
+q("UPDATE users SET username='test.agent1' WHERE id=?", [$a1['id']]); q("UPDATE agent_codes SET is_current=IF(code='test.agent1',1,0) WHERE agent_id=?", [$a1['id']]); q("DELETE FROM agent_codes WHERE code='test.agent1x'");
+q("UPDATE users SET role='admin' WHERE username='test.admin'");
 // ---- 10. phone-size layout snapshots (synthetic staging data) ----
 $m1 = new Browser(); $m1->login('test.agent1');
 foreach (['agent_home' => '/', 'agent_clients' => '/?p=clients', 'agent_new_client' => '/?p=client_form', 'agent_rates' => '/?p=rates', 'agent_transfers' => '/?p=transfers', 'agent_commission' => '/?p=commission', 'agent_transfer_new' => '/?p=transfer_form'] as $k => $pth) { $m1->req($pth); snap($k, $m1->body); }
@@ -284,7 +393,7 @@ foreach ($SNAP as $k => $h) {
 }
 @file_put_contents(data_dir() . '/snapshots.txt', $bundle);
 $lite = '';
-foreach (['agent_home', 'agent_clients', 'agent_new_client', 'agent_transfer_new', 'public_register', 'public_status', 'auditor_transfers'] as $k) {
+foreach (['agent_new_client', 'register_new', 'compliance_center', 'kyc_review', 'returning'] as $k) {
     if (!isset($SNAP[$k])) continue;
     $h = preg_replace('/name="csrf" value="[a-f0-9]+"/', 'name="csrf" value="x"', $SNAP[$k]);
     $h = preg_replace('#<head>.*?</head>#s', '<!--HEAD-->', $h);
