@@ -1,5 +1,6 @@
 <?php
 // Key ring management on the server (never from a web page). Prints ids and providers only, never key material.
+//   php tools/keyring.php init                             (once: empty key ring file where keyring_file points)
 //   php tools/keyring.php status
 //   php tools/keyring.php new k1 local                       (staging/test: data key wrapped by local_kek)
 //   php tools/keyring.php new k1 gcpkms projects/P/locations/L/keyRings/R/cryptoKeys/C   (needs kms_enabled)
@@ -14,6 +15,7 @@ require __DIR__ . '/../inc/reseal.php';
 $a = array_slice($argv, 1);
 try {
     switch ($a[0] ?? 'status') {
+        case 'init': keyring_init(); echo "key ring created (still using k0)\n"; break;
         case 'status': foreach (keyring_status() as $kid => $s) echo $kid, '  ', $s['provider'], $s['active'] ? '  ACTIVE' : '', $s['stable'] ? '  stable (search keys)' : '', $s['kms_key'] ? '  ' . $s['kms_key'] : '', "\n"; break;
         case 'new': keyring_new((string)($a[1] ?? ''), (string)($a[2] ?? ''), $a[3] ?? null); audit_write(null, 'key_created', 'system', null, ($a[1] ?? '') . ' · ' . ($a[2] ?? ''), 'cli'); echo "created ", $a[1], " (not active yet)\n"; break;
         case 'activate': keyring_activate((string)($a[1] ?? '')); audit_write(null, 'key_activated', 'system', null, (string)$a[1], 'cli'); echo "active: ", $a[1], "\n"; break;

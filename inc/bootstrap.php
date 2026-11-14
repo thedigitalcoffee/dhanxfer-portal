@@ -643,7 +643,7 @@ function id_file_encrypted(string $name): bool {
 /** Key id of an ID file (k0 for DXF1), null if not encrypted. */
 function id_file_kid(string $name): ?string {
     $h = @fopen(ids_dir() . '/' . basename($name), 'rb'); if (!$h) return null;
-    $m = (string)fread($h, 9); fclose($h);
+    $m = (string)fread($h, 10); fclose($h);
     if (str_starts_with($m, 'DXF1')) return 'k0';
     return str_starts_with($m, 'DXF2') ? substr($m, 5, ord($m[4] ?? "\0")) : null;
 }

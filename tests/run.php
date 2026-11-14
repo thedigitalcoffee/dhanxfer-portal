@@ -533,7 +533,7 @@ require_once __DIR__ . '/../inc/backup.php';
 $krFile = data_dir() . '/test-keyring-' . bin2hex(random_bytes(4)) . '.json';
 $cfgKeep = $CONFIG;
 $CONFIG['keyring_file'] = $krFile; $CONFIG['local_kek'] = base64_encode(random_bytes(32));
-keyring(true); keyring_key('', true);
+keyring_init(); keyring(true); keyring_key('', true);
 $v1 = enc('KR-PLAIN-1'); $idh = id_hash('KR123456');
 ok(str_starts_with($v1, 'enc:v1:') && keyring_active() === 'k0', 'without a key ring nothing changes: values are sealed with k0 as before');
 keyring_new('k1', 'local');
@@ -545,7 +545,7 @@ ok(str_starts_with($v2, 'enc:v2:k1:') && dec($v2) === 'KR-PLAIN-2' && dec($v1) =
 ok(id_hash('KR123456') === $idh && sec_key('index') === hash_hmac('sha256', 'dhanxfer:index', master_key(), true), 'search keys and signatures stay on the stable key (look-ups keep matching)');
 ok(dec(str_replace('enc:v2:k1:', 'enc:v2:k0:', $v2)) === null && dec(str_replace('enc:v2:k1:', 'enc:v2:k9:', $v2)) === null, 'a value relabelled with another key id does not open (key id is bound in)');
 $fk0 = 'kr_' . bin2hex(random_bytes(6)) . '.jpg';
-$CONFIG['keyring_file'] = '/nonexistent'; keyring(true); keyring_key('', true); id_file_write($fk0, 'OLD-FILE'); $CONFIG['keyring_file'] = $krFile; keyring(true); keyring_key('', true);
+unset($CONFIG['keyring_file']); keyring(true); keyring_key('', true); id_file_write($fk0, 'OLD-FILE'); $CONFIG['keyring_file'] = $krFile; keyring(true); keyring_key('', true);
 $fk1 = 'kr_' . bin2hex(random_bytes(6)) . '.jpg'; id_file_write($fk1, 'NEW-FILE');
 ok(id_file_kid($fk0) === 'k0' && id_file_kid($fk1) === 'k1' && id_file_read($fk0) === 'OLD-FILE' && id_file_read($fk1) === 'NEW-FILE', 'ID files: new ones sealed with k1, older ones still open');
 $bkk = backup_create('keyring');
@@ -561,6 +561,12 @@ ok($wet['failed'] === 0 && $left === 0 && id_file_kid($fk0) === 'k1' && id_file_
 ok(dec((string)val('SELECT id_number FROM clients WHERE id=?', [$krc])) === 'KR123456' && (int)val('SELECT id FROM clients WHERE id_number_hash=?', [id_hash('KR123456')]) === $krc, 'after re-sealing the data opens and ID search still finds the client');
 ok(reseal_run(true)['columns']['clients.id_number']['resealed'] === 0, 're-seal can run again safely (nothing left to do)');
 ok(!preg_match('/wrapped|[A-Za-z0-9+\/]{40,}=/', json_encode(keyring_status())), 'key status shows ids and providers only, never key material');
+$CONFIG['keyring_file'] = $krFile . '.missing'; $gone = ''; try { keyring(true); } catch (Throwable $ex) { $gone = $ex->getMessage(); }
+ok(str_contains($gone, 'cannot be read') && !enc_ready(), 'a configured key ring that goes missing stops encryption with a clear error (no silent fall-back to the old key)');
+$CONFIG['keyring_file'] = $krFile; $ringJ = json_decode((string)file_get_contents($krFile), true);
+file_put_contents($krFile, json_encode(['stable' => 'k1'] + $ringJ)); $st = ''; try { keyring(true); } catch (Throwable $ex) { $st = $ex->getMessage(); }
+file_put_contents($krFile, json_encode($ringJ)); keyring(true); keyring_key('', true);
+ok(str_contains($st, 'may not change'), 'the key ring cannot move search keys and signatures off the stable key'); 
 // Cloud KMS adapter against a stand-in: checks the sign-in, the key name and that the key id is bound in
 $saKey = openssl_pkey_new(['private_key_bits' => 2048, 'private_key_type' => OPENSSL_KEYTYPE_RSA]); openssl_pkey_export($saKey, $saPem);
 $saFile = data_dir() . '/test-sa-' . bin2hex(random_bytes(4)) . '.json';

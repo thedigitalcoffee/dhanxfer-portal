@@ -25,15 +25,19 @@ const ENC_COLUMNS = [['clients', 'id_number'], ['beneficiaries', 'account'], ['s
 /** Test hook: replaces the HTTPS transport (fn(string $url, array $headers, string $body): array [status, body]). */
 $GLOBALS['KMS_HTTP'] = $GLOBALS['KMS_HTTP'] ?? null;
 
+/** The key ring file, or null when none is configured. A configured file that cannot be read is an error, never "no ring". */
 function keyring_file(): ?string {
     global $CONFIG;
     $f = $CONFIG['keyring_file'] ?? null;
-    return $f && is_file($f) ? $f : null;
+    if (!$f) return null;
+    if (!is_file($f) || !is_readable($f)) throw new RuntimeException('The key ring file is configured but cannot be read. Encrypted data is unavailable until it is restored.');
+    return $f;
 }
 /** The key ring as configured (cached for the request). Without a file: only k0 from the config. */
 function keyring(bool $reload = false): array {
     static $ring = null;
     if ($ring !== null && !$reload) return $ring;
+    $ring = null;
     $f = keyring_file();
     $r = $f ? json_decode((string)file_get_contents($f), true) : null;
     if ($f && !is_array($r)) throw new RuntimeException('The key ring file cannot be read.');
@@ -41,8 +45,19 @@ function keyring(bool $reload = false): array {
     $r['keys'] = ($r['keys'] ?? []) + ['k0' => ['provider' => 'config']];
     $r['active'] = $r['active'] ?? 'k0';
     $r['stable'] = $r['stable'] ?? 'k0';
+    // k0 is always the config key (all v1 data), and search keys/signatures always use it: changing either would
+    // make older data unreadable or break every look-up and signature
+    if (($r['keys']['k0']['provider'] ?? '') !== 'config' || $r['stable'] !== 'k0') throw new RuntimeException('The key ring may not change k0 or the stable key.');
     foreach (['active', 'stable'] as $k) if (!isset($r['keys'][$r[$k]])) throw new RuntimeException("The key ring names a missing $k key.");
     return $ring = $r;
+}
+/** Creates an empty key ring file (still on k0) where dx-config.php says. Run once: php tools/keyring.php init */
+function keyring_init(): void {
+    global $CONFIG;
+    $f = $CONFIG['keyring_file'] ?? null;
+    if (!$f) throw new RuntimeException('Set keyring_file in dx-config.php first (a path outside the website folder).');
+    if (is_file($f)) throw new RuntimeException('The key ring file already exists.');
+    keyring_save(['active' => 'k0', 'stable' => 'k0', 'keys' => ['k0' => ['provider' => 'config']]]);
 }
 function keyring_save(array $r): void {
     global $CONFIG;
@@ -90,10 +105,10 @@ function kr_local_unwrap(string $kid, string $wrapped): string {
 /* ---- Google Cloud KMS provider (symmetric ENCRYPT_DECRYPT key; only wrap/unwrap calls, never data) ---- */
 function kms_enabled(): bool { global $CONFIG; return !empty($CONFIG['kms_enabled']) && !empty($CONFIG['kms_sa_file']); }
 function kms_http(string $url, array $headers, string $body): array {
-    if (is_callable($GLOBALS['KMS_HTTP'])) return ($GLOBALS['KMS_HTTP'])($url, $headers, $body);
+    if (defined('DX_TEST') && is_callable($GLOBALS['KMS_HTTP'])) return ($GLOBALS['KMS_HTTP'])($url, $headers, $body);
     $ch = curl_init($url);
     curl_setopt_array($ch, [CURLOPT_POST => true, CURLOPT_POSTFIELDS => $body, CURLOPT_HTTPHEADER => $headers, CURLOPT_RETURNTRANSFER => true,
-        CURLOPT_TIMEOUT => 8, CURLOPT_CONNECTTIMEOUT => 4, CURLOPT_SSL_VERIFYPEER => true, CURLOPT_PROTOCOLS => CURLPROTO_HTTPS]);
+        CURLOPT_TIMEOUT => 5, CURLOPT_CONNECTTIMEOUT => 3, CURLOPT_SSL_VERIFYPEER => true, CURLOPT_PROTOCOLS => CURLPROTO_HTTPS]);
     $res = curl_exec($ch); $code = (int)curl_getinfo($ch, CURLINFO_RESPONSE_CODE); curl_close($ch);
     return [$code, $res === false ? '' : (string)$res];
 }
@@ -149,6 +164,8 @@ function keyring_new(string $kid, string $provider, ?string $kmsKey = null): arr
         'gcpkms' => ['provider' => 'gcpkms', 'kms_key' => (string)$kmsKey, 'wrapped' => kms_wrap($kid, (string)$kmsKey, $dek)],
         default  => throw new RuntimeException('Provider must be local or gcpkms.'),
     };
+    // prove the wrapped key opens to the same key before it is written anywhere
+    if (($entry['provider'] === 'local' ? kr_local_unwrap($kid, $entry['wrapped']) : kms_unwrap($kid, $entry)) !== $dek) throw new RuntimeException('The new key did not unwrap to the same value; nothing was saved.');
     $entry['created'] = date('c');
     $entry['check'] = substr(hash_hmac('sha256', 'dhanxfer-key-check', $dek), 0, 16); // detects a wrong key on unwrap, reveals nothing
     $r['keys'][$kid] = $entry;
@@ -168,7 +185,10 @@ function keyring_rewrap(string $kid): void {
     $r = keyring(true); $e = $r['keys'][$kid] ?? null;
     if (!$e || ($e['provider'] ?? '') !== 'gcpkms') throw new RuntimeException('Only Cloud KMS keys are rewrapped.');
     $dek = keyring_key($kid);
-    $r['keys'][$kid]['wrapped'] = kms_wrap($kid, (string)$e['kms_key'], $dek);
+    $new = kms_wrap($kid, (string)$e['kms_key'], $dek);
+    if (kms_unwrap($kid, ['kms_key' => $e['kms_key'], 'wrapped' => $new]) !== $dek) throw new RuntimeException('The rewrapped key did not open to the same key; the key ring was not changed.');
+    $r['keys'][$kid]['wrapped_prev'] = $e['wrapped']; // the earlier wrapping stays until the old KMS version is destroyed
+    $r['keys'][$kid]['wrapped'] = $new;
     $r['keys'][$kid]['rewrapped'] = date('c');
     keyring_save($r);
     keyring_key('', true);
