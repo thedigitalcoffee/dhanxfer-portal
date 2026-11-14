@@ -342,17 +342,29 @@ function master_key(): string {
 function enc_ready(): bool { try { master_key(); return true; } catch (Throwable $e) { return false; } }
 /** A separate key for each job, derived from the master key. */
 function sec_key(string $purpose): string { return hash_hmac('sha256', 'dhanxfer:' . $purpose, master_key(), true); }
+/**
+ * Authenticated encryption: AES-256-GCM (OpenSSL, available on every host) with a random 12-byte nonce.
+ * Stored as "enc:v1:" + base64(nonce | tag | ciphertext). Any change to the stored value makes decryption fail.
+ */
+function aead_seal(string $plain, string $key, string $aad = ''): string {
+    $nonce = random_bytes(12); $tag = '';
+    $ct = openssl_encrypt($plain, 'aes-256-gcm', $key, OPENSSL_RAW_DATA, $nonce, $tag, $aad, 16);
+    if ($ct === false) throw new RuntimeException('Encryption failed.');
+    return $nonce . $tag . $ct;
+}
+function aead_open(string $raw, string $key, string $aad = ''): ?string {
+    if (strlen($raw) < 28) return null;
+    $p = openssl_decrypt(substr($raw, 28), 'aes-256-gcm', $key, OPENSSL_RAW_DATA, substr($raw, 0, 12), substr($raw, 12, 16), $aad);
+    return $p === false ? null : $p;
+}
 function enc(?string $plain): ?string {
     if ($plain === null || $plain === '') return $plain;
-    $nonce = random_bytes(SODIUM_CRYPTO_SECRETBOX_NONCEBYTES);
-    return 'enc:v1:' . base64_encode($nonce . sodium_crypto_secretbox($plain, $nonce, sec_key('data')));
+    return 'enc:v1:' . base64_encode(aead_seal($plain, sec_key('data')));
 }
 function dec(?string $stored): ?string {
     if ($stored === null || !str_starts_with($stored, 'enc:v1:')) return $stored;
     $raw = base64_decode(substr($stored, 7), true);
-    if ($raw === false || strlen($raw) < SODIUM_CRYPTO_SECRETBOX_NONCEBYTES + 1) return null;
-    $p = sodium_crypto_secretbox_open(substr($raw, SODIUM_CRYPTO_SECRETBOX_NONCEBYTES), substr($raw, 0, SODIUM_CRYPTO_SECRETBOX_NONCEBYTES), sec_key('data'));
-    return $p === false ? null : $p;
+    return $raw === false ? null : aead_open($raw, sec_key('data'));
 }
 /** Exact-match search key for an ID number, without storing it readable. */
 function id_hash(?string $idNo): ?string {

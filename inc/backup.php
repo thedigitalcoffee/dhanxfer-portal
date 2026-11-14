@@ -32,8 +32,7 @@ function backup_create(string $label = 'nightly'): array {
     }
     foreach (glob(ids_dir() . '/*') ?: [] as $f) if (is_file($f)) $data['files'][basename($f)] = base64_encode((string)file_get_contents($f));
     $plain = gzencode(json_encode($data, JSON_UNESCAPED_UNICODE | JSON_INVALID_UTF8_SUBSTITUTE), 6);
-    $nonce = random_bytes(SODIUM_CRYPTO_SECRETBOX_NONCEBYTES);
-    $blob = 'DXB1' . $nonce . sodium_crypto_secretbox($plain, $nonce, sec_key('backup'));
+    $blob = 'DXB1' . aead_seal($plain, sec_key('backup'), 'dhanxfer-backup');
     $name = 'dx-' . date('Ymd-His') . '-' . preg_replace('/[^a-z0-9-]/', '', $label) . '.bak';
     $path = backup_dir() . '/' . $name;
     file_put_contents($path, $blob, LOCK_EX);
@@ -47,9 +46,8 @@ function backup_read(string $name): array {
     $path = backup_dir() . '/' . basename($name);
     $blob = (string)@file_get_contents($path);
     if (!str_starts_with($blob, 'DXB1')) throw new RuntimeException('Not a DhanXfer backup file.');
-    $nonce = substr($blob, 4, SODIUM_CRYPTO_SECRETBOX_NONCEBYTES);
-    $plain = sodium_crypto_secretbox_open(substr($blob, 4 + SODIUM_CRYPTO_SECRETBOX_NONCEBYTES), $nonce, sec_key('backup'));
-    if ($plain === false) throw new RuntimeException('The backup could not be decrypted (wrong key or damaged file).');
+    $plain = aead_open(substr($blob, 4), sec_key('backup'), 'dhanxfer-backup');
+    if ($plain === null) throw new RuntimeException('The backup could not be decrypted (wrong key or damaged file).');
     $data = json_decode((string)gzdecode($plain), true);
     if (!is_array($data)) throw new RuntimeException('The backup is damaged.');
     return $data;
