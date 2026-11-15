@@ -72,7 +72,7 @@ function e2e_cleanup(): void {
     foreach (array_column(all("SELECT id FROM users WHERE username IN ('test.agent1','test.agent2')"), 'id') as $ta) { q('DELETE FROM withdrawal_events WHERE withdrawal_id IN (SELECT id FROM commission_withdrawals WHERE agent_id=?)', [$ta]); q('DELETE FROM commission_withdrawals WHERE agent_id=?', [$ta]); q('DELETE FROM commission_ledger WHERE agent_id=?', [$ta]); } q("DELETE FROM clients WHERE name IN ('E2E Client One','E2E Client Two')");
     $sa14 = array_column(all("SELECT id FROM users WHERE username IN ('e2e.agentx','e2e.manager')"), 'id');
     if ($sa14) { $in14 = implode(',', array_map('intval', $sa14)); q("DELETE FROM referral_links WHERE agent_id IN ($in14)"); q("DELETE FROM agent_events WHERE agent_id IN ($in14)"); q("DELETE FROM password_resets WHERE user_id IN ($in14)"); q("DELETE FROM submissions WHERE agent_id IN ($in14)"); q("DELETE FROM agent_codes WHERE agent_id IN ($in14)"); }
-    q("DELETE FROM users WHERE username IN ('e2e.legacy','e2e.staffx','e2e.v2owner','e2e.agentx','e2e.manager')"); q('DELETE FROM login_attempts');
+    q("DELETE FROM users WHERE username IN ('e2e.legacy','e2e.staffx','e2e.v2owner','e2e.agentx','e2e.manager','e2e.finance')"); q('DELETE FROM login_attempts');
     q("UPDATE users SET manager_id=NULL, account_status='active', active=1, agent_can_clients=1, agent_can_transfers=1 WHERE username IN ('test.agent1','test.agent2')");
     q("DELETE FROM referral_links WHERE slug='test.agent1x'"); q("UPDATE referral_links l JOIN users u ON u.id=l.agent_id SET l.is_primary=(l.slug=u.username), l.status='active' WHERE u.username IN ('test.agent1','test.agent2')");
     $ids = array_column(all("SELECT id FROM clients WHERE name LIKE 'E2E %'"), 'id');
@@ -597,8 +597,10 @@ $mg->req('/?p=subagents&id=' . $ax['id']); snap('subagents', $mg->body);
 // ---- 15. commission wallet and manual withdrawals ----
 require_once __DIR__ . '/../inc/wallet.php';
 q("DELETE FROM commission_ledger WHERE agent_id=?", [$a1['id']]); q("DELETE FROM withdrawal_events WHERE withdrawal_id IN (SELECT id FROM commission_withdrawals WHERE agent_id=?)", [$a1['id']]); q("DELETE FROM commission_withdrawals WHERE agent_id=?", [$a1['id']]);
-q("INSERT INTO transfers (ref_no, client_name, agent_id, send_amount, send_currency, receive_currency, status, transfer_date, commission_per_unit, commission, commission_currency, commission_fx_rate, commission_fx_date, commission_fx_source, commission_cad, commission_locked_at)
-   VALUES ('E2E-W1','E2E Wallet',?,84000,'CAD','INR','completed',CURDATE(),0.5,42000,'INR',60,CURDATE(),'market test',700,NOW())", [$a1['id']]);
+q("INSERT INTO transfers (ref_no, client_name, agent_id, send_amount, send_currency, receive_currency, status, completed_via, transfer_date, commission_per_unit, commission, commission_currency, commission_fx_rate, commission_fx_date, commission_fx_source, commission_cad, commission_locked_at)
+   VALUES ('E2E-W1','E2E Wallet',?,84000,'CAD','INR','completed','panel',CURDATE(),0.5,42000,'INR',60,CURDATE(),'market test',700,NOW())", [$a1['id']]);
+$finPw = 'E2E-Finance-' . bin2hex(random_bytes(4));
+q("INSERT INTO users (role, username, name, password_hash, must_change_password) VALUES ('accountant','e2e.finance','E2E Finance',?,0)", [password_hash($finPw, PASSWORD_DEFAULT)]); $T['e2e.finance'] = ['password' => $finPw];
 $wag = new Browser(); $wag->login('test.agent1'); $wag->req('/?p=commission');
 ok(str_contains($wag->body, 'CAD 700.00') && str_contains($wag->body, 'Request withdrawal') && str_contains($wag->body, 'CAD 500.00'), "agent's wallet shows the locked CAD earnings and the CAD 500 first minimum");
 // two withdrawal requests for most of the balance sent at the same moment from two sessions: only one may reserve
@@ -617,16 +619,14 @@ $adw->post('/?p=withdrawals', ['id' => (string)$w15, 'act' => 'move', 'to' => 'u
 $adw->post('/?p=withdrawals', ['id' => (string)$w15, 'act' => 'move', 'to' => 'approved', 'reason' => 'E2E orders verified']);
 $adw->post('/?p=withdrawals', ['id' => (string)$w15, 'act' => 'move', 'to' => 'processing', 'reason' => 'E2E admin tries finance step']);
 ok(val('SELECT status FROM commission_withdrawals WHERE id=?', [$w15]) === 'approved', 'admin reviews and approves; processing needs finance');
-q("UPDATE users SET role='super_admin' WHERE username='test.admin'");
-$sw = new Browser(); fresh_step_wait(); $sw->login('test.admin');
+$sw = new Browser(); $sw->login('e2e.finance');
 $sw->post('/?p=withdrawals', ['id' => (string)$w15, 'act' => 'move', 'to' => 'processing', 'reason' => 'E2E sent by Interac']);
 $sw->post('/?p=withdrawals', ['id' => (string)$w15, 'act' => 'move', 'to' => 'paid', 'reason' => 'E2E paid', 'payment_date' => date('Y-m-d'), 'reference' => 'E2E-REF-' . $w15]);
 ok(val('SELECT status FROM commission_withdrawals WHERE id=?', [$w15]) === 'processing', 'Paid without the payment confirmation tick is refused');
 $sw->req('/?p=withdrawals&id=' . $w15); snap('withdrawal_admin', $sw->body);
 $sw->post('/?p=withdrawals', ['id' => (string)$w15, 'act' => 'move', 'to' => 'paid', 'reason' => 'E2E paid', 'confirm' => '1', 'payment_date' => date('Y-m-d'), 'reference' => 'E2E-REF-' . $w15, 'method' => 'Interac']);
 $bal15 = wallet_balance((int)$a1['id']);
-ok(val('SELECT status FROM commission_withdrawals WHERE id=?', [$w15]) === 'paid' && $bal15['paid'] == 600.0 && $bal15['reserved'] == 0.0 && wd_verify($w15) === null, 'finance marks it Paid with date and reference; ledger and history agree');
-q("UPDATE users SET role='admin' WHERE username='test.admin'");
+ok(val('SELECT status FROM commission_withdrawals WHERE id=?', [$w15]) === 'paid' && $bal15['paid'] == 600.0 && $bal15['reserved'] == 0.0 && wd_verify($w15) === null, 'finance (a different person from the approver) marks it Paid with date and reference; ledger and history agree');
 $wag->req('/?p=commission'); snap('agent_wallet', $wag->body);
 ok(str_contains($wag->body, 'E2E-REF-' . $w15) && str_contains($wag->body, 'CAD 100.00') && str_contains($wag->body, 'Minimum: CAD 100.00'), 'the agent sees the payout and the CAD 100 minimum after the first paid withdrawal');
 q("DELETE FROM transfers WHERE ref_no='E2E-W1'");

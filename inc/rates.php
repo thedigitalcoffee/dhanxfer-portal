@@ -53,9 +53,10 @@ function market_rate(string $send, string $recv): ?float {
     return $r ? (float)$r : null;
 }
 
-/** Keeps one market rate per pair per day (latest fetch wins). */
+/** Keeps one market rate per pair per day (first fetch wins). */
 function record_market(string $date, string $send, string $recv, float $rate, string $source): void {
-    q('INSERT INTO market_rates (rate_date, send_currency, receive_currency, rate, source) VALUES (?,?,?,?,?) ON DUPLICATE KEY UPDATE rate=VALUES(rate), source=VALUES(source), fetched_at=NOW()',
+    // the first rate saved for a day stays: commissions are locked against it, so it must never change afterwards
+    q('INSERT IGNORE INTO market_rates (rate_date, send_currency, receive_currency, rate, source) VALUES (?,?,?,?,?)',
         [$date, $send, $recv, round($rate, 6), $source]);
 }
 /** Records today's market rate for every active pair. Returns how many were saved. */

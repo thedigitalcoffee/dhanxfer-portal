@@ -25,16 +25,15 @@ const WD_FIRST_MIN_CAD = 500.00;
 const WD_NEXT_MIN_CAD = 100.00;
 
 /* ---------- commission lock at order submission ---------- */
-/** CAD→$cur mid-market rate for the order day (or the nearest earlier day within 3 days). [rate, date, source] or null. */
+/** CAD→$cur mid-market rate saved for exactly the order day (the day the order was submitted). [rate, date, source] or null. */
 function fx_cad_rate(string $cur, string $day): ?array {
     if ($cur === 'CAD') return [1.0, $day, 'same currency'];
-    $r = one("SELECT rate, rate_date, source FROM market_rates WHERE send_currency='CAD' AND receive_currency=? AND rate_date BETWEEN DATE_SUB(?, INTERVAL 3 DAY) AND ? ORDER BY rate_date DESC LIMIT 1", [$cur, $day, $day]);
+    $r = one("SELECT rate, rate_date, source FROM market_rates WHERE send_currency='CAD' AND receive_currency=? AND rate_date=?", [$cur, $day]);
     if ($r && (float)$r['rate'] > 0) return [(float)$r['rate'], $r['rate_date'], 'market ' . $r['source']];
-    // the other direction (destination→CAD) if only that was recorded
-    $r = one("SELECT rate, rate_date, source FROM market_rates WHERE send_currency=? AND receive_currency='CAD' AND rate_date BETWEEN DATE_SUB(?, INTERVAL 3 DAY) AND ? ORDER BY rate_date DESC LIMIT 1", [$cur, $day, $day]);
-    if ($r && (float)$r['rate'] > 0) return [round(1 / (float)$r['rate'], 6), $r['rate_date'], 'market ' . $r['source'] . ' (inverse)'];
     return null;
 }
+/** Orders submitted before the wallet started were settled outside the panel: they never become withdrawable. */
+function wallet_start(): string { return (string)setting('wallet_start', '2999-01-01 00:00:00'); }
 /**
  * Locks the commission of one order: per-unit rate, destination-currency amount and the CAD value at the
  * order-day rate. Runs when the order is submitted; a locked order is never changed again.
@@ -44,21 +43,24 @@ function commission_lock(int $transferId): bool {
     require_once __DIR__ . '/rates.php';
     $t = one('SELECT * FROM transfers WHERE id=?', [$transferId]);
     if (!$t || !$t['agent_id'] || $t['commission_locked_at']) return (bool)($t['commission_locked_at'] ?? false);
+    if ((string)$t['created_at'] < wallet_start()) return false; // older order: no new calculation, no CAD lock
     if ($t['commission'] === null) {
         $per = commission_rate_for((int)$t['agent_id'], $t['send_currency'], $t['receive_currency']);
         if ($per === null || $t['send_amount'] === null) return false;
         q('UPDATE transfers SET commission_per_unit=?, commission=?, commission_currency=? WHERE id=? AND commission IS NULL', [$per, round((float)$t['send_amount'] * $per, 2), $t['receive_currency'], $transferId]);
         $t = one('SELECT * FROM transfers WHERE id=?', [$transferId]);
     }
-    $fx = fx_cad_rate((string)$t['commission_currency'], (string)$t['transfer_date']);
+    // the FX day is the day the order was submitted (not a date typed on the form)
+    $fx = fx_cad_rate((string)$t['commission_currency'], substr((string)$t['created_at'], 0, 10));
     if (!$fx) return false; // shown to finance as "waiting for an FX rate"; locked later with that day's rate
     return commission_lock_with($t, $fx[0], $fx[1], $fx[2], null);
 }
 function commission_lock_with(array $t, float $rate, string $date, string $source, ?int $by): bool {
-    if ($rate <= 0) throw new RuntimeException('The FX rate must be above zero.');
-    $cad = round((float)$t['commission'] / $rate, 2);
+    $rate = round($rate, 6);
+    if ($rate < 0.0001 || $rate > 1000000) throw new RuntimeException('The FX rate is out of range.');
+    $cad = round((float)$t['commission'] / $rate, 2); // worked out from the stored (rounded) rate, so it can be reproduced
     $n = q('UPDATE transfers SET commission_fx_rate=?, commission_fx_date=?, commission_fx_source=?, commission_cad=?, commission_locked_at=NOW() WHERE id=? AND commission_locked_at IS NULL AND commission IS NOT NULL',
-           [round($rate, 6), $date, mb_substr($source, 0, 60), $cad, $t['id']])->rowCount();
+           [$rate, $date, mb_substr($source, 0, 60), $cad, $t['id']])->rowCount();
     if ($n) audit_write($by, 'commission_locked', 'transfer', $t['id'], $t['ref_no'] . ': ' . $t['commission'] . ' ' . $t['commission_currency'] . ' = ' . number_format($cad, 2, '.', '') . ' CAD at ' . $rate . ' (' . $date . ', ' . $source . ')', $by ? client_ip() : 'system');
     return $n === 1;
 }
@@ -67,22 +69,24 @@ function commission_lock_with(array $t, float $rate, string $date, string $sourc
 /** Credits completed orders with a locked CAD commission (safe to run any time: one credit per order). */
 function wallet_sync(?int $agentId = null): int {
     // older completed orders: lock with their own order-day rate first
-    foreach (all("SELECT id FROM transfers WHERE status='completed' AND agent_id IS NOT NULL AND commission_locked_at IS NULL" . ($agentId ? ' AND agent_id=' . (int)$agentId : '') . ' LIMIT 500') as $r) commission_lock((int)$r['id']);
+    // orders submitted after the wallet started whose order-day rate arrived later in the day: lock now with that day's rate
+    foreach (all("SELECT id FROM transfers WHERE status IN ('pending','accepted','completed') AND agent_id IS NOT NULL AND commission_locked_at IS NULL AND created_at >= ?" . ($agentId ? ' AND agent_id=' . (int)$agentId : '') . ' LIMIT 500', [wallet_start()]) as $r) commission_lock((int)$r['id']);
+    // credited only when completed in the panel (accept, then complete); never orders saved as completed, imported, or older than the wallet
     return q("INSERT IGNORE INTO commission_ledger (agent_id, entry, amount_cad, transfer_id, note)
-              SELECT agent_id, 'earn', commission_cad, id, ref_no FROM transfers WHERE status='completed' AND agent_id IS NOT NULL AND commission_cad IS NOT NULL AND commission_cad > 0" . ($agentId ? ' AND agent_id=' . (int)$agentId : ''))->rowCount();
+              SELECT agent_id, 'earn', commission_cad, id, ref_no FROM transfers WHERE status='completed' AND completed_via='panel' AND created_at >= ? AND agent_id IS NOT NULL AND commission_cad IS NOT NULL AND commission_cad > 0" . ($agentId ? ' AND agent_id=' . (int)$agentId : ''), [wallet_start()])->rowCount();
 }
 function wallet_balance(int $agentId): array {
     $s = [];
     foreach (all('SELECT entry, SUM(amount_cad) s FROM commission_ledger WHERE agent_id=? GROUP BY entry', [$agentId]) as $r) $s[$r['entry']] = (float)$r['s'];
     $e = fn($k) => $s[$k] ?? 0.0;
-    $pending = (float)val("SELECT COALESCE(SUM(commission_cad),0) FROM transfers WHERE agent_id=? AND status='accepted' AND commission_cad IS NOT NULL", [$agentId]);
+    $pending = (float)val("SELECT COALESCE(SUM(commission_cad),0) FROM transfers WHERE agent_id=? AND status='accepted' AND commission_cad IS NOT NULL AND created_at >= ?", [$agentId, wallet_start()]);
     return ['earned' => round($e('earn'), 2), 'available' => round($e('earn') - $e('reserve') + $e('release'), 2),
             'reserved' => round($e('reserve') - $e('release') - $e('paid'), 2), 'paid' => round($e('paid'), 2), 'pending' => round($pending, 2)];
 }
 /** Earnings by destination currency (as earned) and the locked CAD total. */
 function wallet_by_currency(int $agentId): array {
     return all("SELECT commission_currency cur, COUNT(*) n, SUM(commission) amount, SUM(commission_cad) cad, SUM(commission_locked_at IS NULL) unlocked
-                FROM transfers WHERE agent_id=? AND status='completed' AND commission IS NOT NULL GROUP BY commission_currency ORDER BY commission_currency", [$agentId]);
+                FROM transfers WHERE agent_id=? AND status='completed' AND completed_via='panel' AND created_at >= ? AND commission IS NOT NULL GROUP BY commission_currency ORDER BY commission_currency", [$agentId, wallet_start()]);
 }
 function wd_minimum(int $agentId): float {
     return val("SELECT 1 FROM commission_withdrawals WHERE agent_id=? AND status='paid' LIMIT 1", [$agentId]) ? WD_NEXT_MIN_CAD : WD_FIRST_MIN_CAD;
@@ -90,11 +94,13 @@ function wd_minimum(int $agentId): float {
 
 /* ---------- history (insert-only, hash-chained per withdrawal) ---------- */
 function wd_event(int $wid, ?string $from, string $to, ?int $by, ?string $reason, array $data = []): void {
-    $prev = (string)(val('SELECT row_hash FROM withdrawal_events WHERE withdrawal_id=? ORDER BY id DESC LIMIT 1', [$wid]) ?? '');
+    // callers hold the withdrawal row lock (SELECT … FOR UPDATE inside their transaction), so the chain cannot fork
+    $prev = (string)(val('SELECT last_hash FROM commission_withdrawals WHERE id=?', [$wid]) ?? '');
     $at = date('Y-m-d H:i:s');
     $json = $data ? json_encode($data, JSON_UNESCAPED_UNICODE) : null;
     $h = hash_hmac('sha256', implode('|', [$wid, $from, $to, $by, $reason, $json, $at, $prev]), sec_key('audit'));
     q('INSERT INTO withdrawal_events (withdrawal_id, from_status, to_status, user_id, reason, data, at, prev_hash, row_hash) VALUES (?,?,?,?,?,?,?,?,?)', [$wid, $from, $to, $by, $reason, $json, $at, $prev ?: null, $h]);
+    q('UPDATE commission_withdrawals SET last_hash=? WHERE id=?', [$h, $wid]);
     audit_write($by, 'withdrawal_' . $to, 'withdrawal', $wid, ($from ? WD_STATUSES[$from] ?? $from : 'new') . ' → ' . (WD_STATUSES[$to] ?? $to) . ($reason ? ' · ' . mb_substr($reason, 0, 200) : ''), $by ? client_ip() : 'system');
 }
 /** Checks a withdrawal's history chain. Returns the id of the first broken row, or null when intact. */
@@ -105,6 +111,8 @@ function wd_verify(int $wid): ?int {
         if ((string)$r['prev_hash'] !== $prev || !hash_equals($h, (string)$r['row_hash'])) return (int)$r['id'];
         $prev = $h;
     }
+    // removing the newest rows is caught too: the withdrawal row remembers the last hash
+    if ($prev !== (string)val('SELECT last_hash FROM commission_withdrawals WHERE id=?', [$wid])) return -1;
     return null;
 }
 
@@ -143,14 +151,18 @@ function wd_allowed(array $w, array $u): array {
     $review = role_can($u['role'], 'withdrawals.review');
     $team = role_can($u['role'], 'withdrawals.team') && $agent && (int)$agent['manager_id'] === (int)$u['id'];
     $pay = role_can($u['role'], 'withdrawals.pay');
-    $limitOk = $review || ($team && $u['approval_limit_cad'] !== null && (float)$w['amount_cad'] <= (float)$u['approval_limit_cad']);
+    // a manager's limit covers everything they approved for this agent in 30 days, so splitting a request does not get around it
+    $approved30 = $team ? (float)val("SELECT COALESCE(SUM(amount_cad),0) FROM commission_withdrawals WHERE agent_id=? AND approved_by=? AND approved_at > (NOW() - INTERVAL 30 DAY) AND status NOT IN ('rejected','cancelled') AND id<>?", [$w['agent_id'], $u['id'], $w['id']]) : 0.0;
+    $limitOk = $review || ($team && $u['approval_limit_cad'] !== null && (float)$w['amount_cad'] + $approved30 <= (float)$u['approval_limit_cad']);
+    $notApprover = (int)($w['approved_by'] ?? 0) !== (int)$u['id'];       // whoever approved cannot also process or pay
+    $notReconciler = (int)($w['reconciled_by'] ?? 0) !== (int)$u['id'];   // whoever reconciled cannot also retry or pay
     $rev = $review || $team;
     $map = [
-        'requested' => ['under_review' => $rev, 'approved' => $rev && $limitOk, 'rejected' => $rev, 'cancelled' => $rev],
+        'requested' => ['under_review' => $rev, 'rejected' => $rev, 'cancelled' => $rev],
         'under_review' => ['approved' => $rev && $limitOk, 'rejected' => $rev, 'cancelled' => $rev],
-        'approved' => ['processing' => $pay, 'cancelled' => $rev || $pay],
-        'processing' => ['paid' => $pay, 'failed' => $pay],
-        'failed' => ['processing' => $pay && $w['reconcile_outcome'] === 'not_paid', 'cancelled' => ($pay || $review) && $w['reconcile_outcome'] === 'not_paid', 'paid' => $pay && $w['reconcile_outcome'] === 'paid'],
+        'approved' => ['processing' => $pay && $notApprover, 'cancelled' => $rev || $pay],
+        'processing' => ['paid' => $pay && $notApprover, 'failed' => $pay],
+        'failed' => ['processing' => $pay && $notApprover && $notReconciler && $w['reconcile_outcome'] === 'not_paid', 'cancelled' => ($pay || $review) && $w['reconcile_outcome'] === 'not_paid', 'paid' => $pay && $notApprover && $notReconciler && $w['reconcile_outcome'] === 'paid'],
     ];
     return array_keys(array_filter($map[$w['status']] ?? []));
 }
@@ -171,15 +183,19 @@ function wd_transition(int $wid, string $to, array $u, array $in): void {
         if (($in['confirm'] ?? '') !== '1') throw new RuntimeException('Confirm that the payment was actually sent.');
         if (!preg_match('/^[A-Za-z0-9][A-Za-z0-9 ._\/-]{3,59}$/', $ref)) throw new RuntimeException('Enter the transaction or reference number (4–60 characters).');
         if (!($pdv = valid_date($pd)) || $pdv > today() || $pdv < substr((string)$w['requested_at'], 0, 10)) throw new RuntimeException('Enter the payment date (not in the future, not before the request).');
-        if (val('SELECT 1 FROM commission_withdrawals WHERE paid_reference=? AND id<>?', [$ref, $wid])) throw new RuntimeException('That reference is already recorded on another withdrawal.');
-        $set = ', paid_reference=?, paid_date=?, paid_method=?, paid_by=?, paid_at=NOW()';
-        $par = [$ref, $pdv, mb_substr(trim((string)($in['method'] ?? '')), 0, 60) ?: null, $u['id']];
+        $norm = strtoupper(preg_replace('/[^A-Za-z0-9]/', '', $ref));
+        if (val('SELECT 1 FROM commission_withdrawals WHERE paid_ref_norm=? AND id<>?', [$norm, $wid])) throw new RuntimeException('That reference is already recorded on another withdrawal.');
+        $set = ', paid_reference=?, paid_ref_norm=?, paid_date=?, paid_method=?, paid_by=?, paid_at=NOW()';
+        $par = [$ref, $norm, $pdv, mb_substr(trim((string)($in['method'] ?? '')), 0, 60) ?: null, $u['id']];
         $data = ['reference' => $ref, 'payment_date' => $pdv, 'method' => $in['method'] ?? null];
     }
     if ($to === 'approved') { $set = ', approved_by=?, approved_at=NOW()'; $par = [$u['id']]; }
     if ($to === 'processing' && $w['status'] === 'failed') { $set = ', reconcile_outcome=NULL'; } // a retry needs a new reconciliation if it fails again
     db()->beginTransaction();
     try {
+        // decide on the row as it is now, under a lock: nobody else can change it (or its reconciliation) meanwhile
+        $now = one('SELECT * FROM commission_withdrawals WHERE id=? FOR UPDATE', [$wid]);
+        if ($now['status'] !== $w['status'] || $now['reconcile_outcome'] !== $w['reconcile_outcome'] || !in_array($to, wd_allowed($now, $u), true)) throw new RuntimeException('Someone else just changed this withdrawal. Open it again.');
         $n = q("UPDATE commission_withdrawals SET status=?, updated_at=NOW()$set WHERE id=? AND status=?", array_merge([$to], $par, [$wid, $w['status']]))->rowCount();
         if ($n !== 1) throw new RuntimeException('Someone else just changed this withdrawal. Open it again.');
         if (in_array($to, ['rejected', 'cancelled'], true))
@@ -201,15 +217,39 @@ function wd_reconcile(int $wid, array $u, string $outcome, string $note): void {
     if (!in_array($outcome, ['not_paid', 'paid'], true)) throw new RuntimeException('Choose what the bank or provider confirmed.');
     $note = trim($note);
     if (mb_strlen($note) < 10) throw new RuntimeException('Describe what was checked (at least 10 characters), e.g. the bank statement or provider reply.');
-    q('UPDATE commission_withdrawals SET reconcile_outcome=?, reconciled_by=?, reconciled_at=NOW() WHERE id=? AND status=?', [$outcome, $u['id'], $wid, 'failed']);
-    wd_event($wid, 'failed', 'failed', (int)$u['id'], 'Reconciled: ' . ($outcome === 'paid' ? 'money did arrive' : 'money was not paid out') . ' · ' . $note, ['reconcile' => $outcome]);
+    db()->beginTransaction();
+    try {
+        q('SELECT id FROM commission_withdrawals WHERE id=? FOR UPDATE', [$wid]);
+        // one reconciliation per failed attempt: it cannot be flipped afterwards
+        if (q('UPDATE commission_withdrawals SET reconcile_outcome=?, reconciled_by=?, reconciled_at=NOW() WHERE id=? AND status=? AND reconcile_outcome IS NULL', [$outcome, $u['id'], $wid, 'failed'])->rowCount() !== 1)
+            throw new RuntimeException('This failed payment was already reconciled.');
+        wd_event($wid, 'failed', 'failed', (int)$u['id'], 'Reconciled: ' . ($outcome === 'paid' ? 'money did arrive' : 'money was not paid out') . ' · ' . $note, ['reconcile' => $outcome]);
+        db()->commit();
+    } catch (Throwable $e) { if (db()->inTransaction()) db()->rollBack(); throw $e; }
 }
-/** Finance locks the CAD value of an older order that had no market rate for its day (rate typed with its source). */
-function commission_lock_manual(int $transferId, array $u, string $rate, string $source, string $reason): void {
+/**
+ * When no market rate was saved for an order's day, finance enters that day's CAD rate with its source.
+ * Two people: one proposes, a different finance user confirms. Only completed, panel orders after the wallet
+ * started, with no market rate that day; and the rate must be within 10% of any market rate of the nearby days.
+ */
+function commission_lock_manual(int $transferId, array $u, string $rate, string $source, string $reason): string {
     if (!role_can($u['role'], 'withdrawals.pay')) throw new RuntimeException('Only finance can lock a commission rate.');
     $t = one('SELECT * FROM transfers WHERE id=?', [$transferId]);
-    if (!$t || $t['commission_locked_at'] || $t['commission'] === null) throw new RuntimeException('Nothing to lock.');
-    if (!is_numeric($rate) || (float)$rate <= 0 || mb_strlen(trim($source)) < 3 || mb_strlen(trim($reason)) < 5) throw new RuntimeException('Enter the CAD rate of the order day, where it came from, and a reason.');
-    commission_lock_with($t, (float)$rate, (string)$t['transfer_date'], 'manual: ' . trim($source), (int)$u['id']);
+    if (!$t || $t['commission_locked_at'] || $t['commission'] === null || $t['status'] !== 'completed' || $t['completed_via'] !== 'panel' || (string)$t['created_at'] < wallet_start()) throw new RuntimeException('Nothing to lock for this order.');
+    $day = substr((string)$t['created_at'], 0, 10);
+    if (fx_cad_rate((string)$t['commission_currency'], $day)) throw new RuntimeException('A market rate exists for that day; it is used automatically.');
+    if (!preg_match('/^\d{1,7}(\.\d{1,6})?$/', trim($rate)) || (float)$rate < 0.0001 || mb_strlen(trim($source)) < 3 || mb_strlen(trim($reason)) < 5) throw new RuntimeException('Enter the CAD rate of the order day (a plain number), where it came from, and a reason.');
+    $r = round((float)$rate, 6);
+    $near = val("SELECT rate FROM market_rates WHERE send_currency='CAD' AND receive_currency=? AND rate_date BETWEEN DATE_SUB(?, INTERVAL 7 DAY) AND DATE_ADD(?, INTERVAL 7 DAY) ORDER BY ABS(DATEDIFF(rate_date, ?)) LIMIT 1", [$t['commission_currency'], $day, $day, $day]);
+    if ($near !== null && abs($r / (float)$near - 1) > 0.10) throw new RuntimeException('That rate is more than 10% away from the market rate of the nearby days (' . (float)$near . '). Check it.');
+    if (!$t['fx_proposed_rate']) {
+        q('UPDATE transfers SET fx_proposed_rate=?, fx_proposed_source=?, fx_proposed_by=? WHERE id=? AND fx_proposed_rate IS NULL AND commission_locked_at IS NULL', [$r, mb_substr(trim($source), 0, 60), $u['id'], $transferId]);
+        audit_write((int)$u['id'], 'commission_fx_proposed', 'transfer', $transferId, $r . ' (' . trim($source) . ') · ' . mb_substr(trim($reason), 0, 200), client_ip());
+        return 'proposed';
+    }
+    if ((int)$t['fx_proposed_by'] === (int)$u['id']) throw new RuntimeException('A different finance user must confirm the rate you proposed.');
+    if (abs((float)$t['fx_proposed_rate'] - $r) > 0.0000005) throw new RuntimeException('The rate does not match the proposed rate (' . (float)$t['fx_proposed_rate'] . '). Clear it with the proposer.');
+    commission_lock_with($t, $r, $day, 'manual: ' . $t['fx_proposed_source'] . ' (proposed #' . $t['fx_proposed_by'] . ', confirmed #' . $u['id'] . ')', (int)$u['id']);
     audit_write((int)$u['id'], 'commission_locked_manual', 'transfer', $transferId, mb_substr(trim($reason), 0, 200), client_ip());
+    return 'locked';
 }

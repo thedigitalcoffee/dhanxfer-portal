@@ -44,7 +44,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
         require_once __DIR__ . '/../wallet.php';
         commission_lock($tid);
         apply_commission($tid);
-        if ($status === 'completed') wallet_sync((int)$c['agent_id']);
+        // an order saved straight as completed is not credited to the wallet: only orders accepted and completed in the panel are
         audit('create_transfer', 'transfer', $tid, $ref . ' ' . $status);
         if (!$canDecide) notify('Transfer request ' . $ref . ' from ' . $u['name'], "{$u['name']} ({$u['ref_code']}) requested a transfer of " . money($amt, $v['send_currency']) . ".\n\nAccept or reject it in the portal: " . app_link("/?p=transfers&id=$tid"), 'transfer_request');
         flash($canDecide ? "Transfer $ref saved." : "Transfer request $ref sent. An admin will accept or reject it.");

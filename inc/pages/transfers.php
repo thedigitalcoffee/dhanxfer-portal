@@ -38,10 +38,10 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
         $bid = (int)($t['beneficiary_id'] ?: post('beneficiary_id'));
         // transfers accepted before beneficiaries were reviewed are linked to an approved beneficiary before payout
         if (!$t['beneficiary_id'] && !benef_usable($bid ? one('SELECT * FROM beneficiaries WHERE id=?', [$bid]) : null, (int)$t['client_id'])[0]) { flash('Cannot complete: choose the approved beneficiary this transfer is paid to.', 'bad'); redirect('/?p=transfers&id=' . $t['id']); }
-        if (q("UPDATE transfers SET status='completed', receipt_no=COALESCE(?, receipt_no), beneficiary_id=? WHERE id=? AND status='accepted'", [$receipt ?: null, $bid, $t['id']])->rowCount())
+        if (q("UPDATE transfers SET status='completed', completed_via='panel', receipt_no=COALESCE(?, receipt_no), beneficiary_id=? WHERE id=? AND status='accepted'", [$receipt ?: null, $bid, $t['id']])->rowCount())
             $ok = 'Transfer ' . $t['ref_no'] . ' marked completed.';
     } elseif ($act === 'cancel' && $t['status'] === 'pending' && ($canDecide || (int)$t['requested_by'] === (int)$u['id'])) {
-        q("UPDATE transfers SET status='cancelled' WHERE id=?", [$t['id']]); $ok = 'Transfer request cancelled.';
+        if (q("UPDATE transfers SET status='cancelled' WHERE id=? AND status='pending'", [$t['id']])->rowCount()) $ok = 'Transfer request cancelled.';
     }
     if ($ok) apply_commission((int)$t['id']);
     if ($ok && $act === 'complete' && $t['agent_id']) { require_once __DIR__ . '/../wallet.php'; commission_lock((int)$t['id']); wallet_sync((int)$t['agent_id']); }

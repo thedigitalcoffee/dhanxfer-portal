@@ -16,8 +16,9 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
     $act = post('act');
     try {
         if ($act === 'lock_fx') {
-            commission_lock_manual((int)post('transfer'), $u, post('rate'), post('source'), post('reason'));
-            flash('Commission locked in CAD.'); redirect('/?p=withdrawals&v=fx');
+            try { $res = commission_lock_manual((int)post('transfer'), $u, post('rate'), post('source'), post('reason')); flash($res === 'proposed' ? 'Rate proposed. A different finance user must confirm it.' : 'Commission locked in CAD.'); }
+            catch (RuntimeException $ex) { flash($ex->getMessage(), 'bad'); }
+            redirect('/?p=withdrawals&v=fx');
         }
         $w = one('SELECT * FROM commission_withdrawals WHERE id=?', [(int)post('id')]);
         if (!$w || !$visible($w)) throw new RuntimeException('Withdrawal not found.');
@@ -41,7 +42,7 @@ if (get('id') !== '') {
     page_head('Withdrawal #' . $w['id']); ?>
     <div class="spread"><div><div class="tag">Withdrawal #<?= (int)$w['id'] ?> · <?= e($w['agent_name']) ?> (<?= e($w['username']) ?>)</div><h1><?= $cad($w['amount_cad']) ?></h1><div class="row" style="margin-top:6px"><?= $pill($w['status']) ?><?php if ($w['status'] === 'failed'): ?><span class="tag">Reconciliation: <?= e($w['reconcile_outcome'] ? ($w['reconcile_outcome'] === 'paid' ? 'money did arrive' : 'not paid out') : 'not done yet') ?></span><?php endif; ?></div></div>
       <a class="btn" href="/?p=withdrawals">All withdrawals</a></div>
-    <?php if ($broken): ?><div class="banner bad">The history of this withdrawal was changed outside the portal (row <?= (int)$broken ?>). Report this to the owner.</div><?php endif; ?>
+    <?php if ($broken): ?><div class="banner bad">The history of this withdrawal was changed outside the portal<?= $broken > 0 ? ' (row ' . (int)$broken . ')' : ' (rows removed)' ?>. Report this to the owner.</div><?php endif; ?>
     <div class="grid2"><div>
       <div class="card"><dl class="kv"><?= kv('Requested', fdatetime($w['requested_at'])) . kv('Minimum that applied', $cad($w['min_applied'])) . kv('Note from sub-agent', $w['note']) . kv('Approved', $w['approved_at'] ? fdatetime($w['approved_at']) . ' by ' . (string)val('SELECT name FROM users WHERE id=?', [$w['approved_by']]) : '') . kv('Paid', $w['paid_at'] ? $w['paid_date'] . ' · ref ' . $w['paid_reference'] . ($w['paid_method'] ? ' · ' . $w['paid_method'] : '') . ' · by ' . (string)val('SELECT name FROM users WHERE id=?', [$w['paid_by']]) : '') ?></dl>
         <p class="tag" style="margin-bottom:0">Sub-agent wallet now: available <?= $cad($bal['available']) ?> · reserved <?= $cad($bal['reserved']) ?> · paid <?= $cad($bal['paid']) ?></p></div>
@@ -71,12 +72,12 @@ if (get('id') !== '') {
 }
 
 if (get('v') === 'fx' && $canPay) {
-    $rows = all("SELECT t.id, t.ref_no, t.transfer_date, t.commission, t.commission_currency, a.name FROM transfers t JOIN users a ON a.id=t.agent_id WHERE t.status='completed' AND t.commission IS NOT NULL AND t.commission_locked_at IS NULL ORDER BY t.transfer_date LIMIT 200");
+    $rows = all("SELECT t.id, t.ref_no, DATE(t.created_at) transfer_date, t.commission, t.commission_currency, t.fx_proposed_rate, t.fx_proposed_source, t.fx_proposed_by, a.name FROM transfers t JOIN users a ON a.id=t.agent_id WHERE t.status='completed' AND t.completed_via='panel' AND t.created_at >= ? AND t.commission IS NOT NULL AND t.commission_locked_at IS NULL ORDER BY t.created_at LIMIT 200", [wallet_start()]);
     page_head('Commission waiting for an FX rate'); ?>
     <div class="spread"><div><h1>Commission waiting for an FX rate</h1><div class="muted">Completed orders whose CAD value could not be locked automatically (no market rate saved for the order day). Enter that day's CAD rate and its source.</div></div><a class="btn" href="/?p=withdrawals">Back</a></div>
     <div class="tablewrap"><table><thead><tr><th>Order</th><th>Day</th><th>Sub-agent</th><th class="r">Commission</th><th>Lock</th></tr></thead><tbody>
-    <?php foreach ($rows as $r): ?><tr><td class="num"><?= e($r['ref_no']) ?></td><td><?= e($r['transfer_date']) ?></td><td><?= e($r['name']) ?></td><td class="r num"><?= e($r['commission'] . ' ' . $r['commission_currency']) ?></td>
-      <td><form method="post" class="row"><?= csrf_field() ?><input type="hidden" name="act" value="lock_fx"><input type="hidden" name="transfer" value="<?= (int)$r['id'] ?>"><input name="rate" required placeholder="<?= e($r['commission_currency']) ?> per 1 CAD" style="width:110px"><input name="source" required placeholder="Source (e.g. Bank of Canada)" style="width:150px"><input name="reason" required minlength="5" placeholder="Reason" style="width:120px"><button class="btn sm">Lock</button></form></td></tr><?php endforeach; ?>
+    <?php foreach ($rows as $r): ?><tr><td class="num"><?= e($r['ref_no']) ?></td><td><?= e($r['transfer_date']) ?></td><td><?= e($r['name']) ?></td><td class="r num"><?= e($r['commission'] . ' ' . $r['commission_currency']) ?><?= $r['fx_proposed_rate'] ? '<div class="tag">proposed ' . e((float)$r['fx_proposed_rate'] . ' · ' . $r['fx_proposed_source']) . ' by #' . (int)$r['fx_proposed_by'] . '</div>' : '' ?></td>
+      <td><form method="post" class="row"><?= csrf_field() ?><input type="hidden" name="act" value="lock_fx"><input type="hidden" name="transfer" value="<?= (int)$r['id'] ?>"><input name="rate" required placeholder="<?= e($r['commission_currency']) ?> per 1 CAD" style="width:110px"><input name="source" required placeholder="Source (e.g. Bank of Canada)" style="width:150px"><input name="reason" required minlength="5" placeholder="Reason" style="width:120px"><button class="btn sm"><?= $r['fx_proposed_rate'] ? 'Confirm' : 'Propose' ?></button></form></td></tr><?php endforeach; ?>
     <?php if (!$rows): ?><tr><td colspan="5" class="empty">Nothing waiting.</td></tr><?php endif; ?></tbody></table></div>
     <?php page_foot(); return;
 }
@@ -86,7 +87,7 @@ $where = ['1=1']; $par = [];
 if (!$canReview && !$canPay) { $where[] = 'a.manager_id=?'; $par[] = (int)$u['id']; }
 if (isset(WD_STATUSES[$st])) { $where[] = 'w.status=?'; $par[] = $st; }
 $rows = all('SELECT w.*, a.name agent_name, a.username FROM commission_withdrawals w JOIN users a ON a.id=w.agent_id WHERE ' . implode(' AND ', $where) . " ORDER BY FIELD(w.status,'requested','under_review','approved','processing','failed','paid','rejected','cancelled'), w.id DESC LIMIT 500", $par);
-$nfx = $canPay ? (int)val("SELECT COUNT(*) FROM transfers WHERE status='completed' AND commission IS NOT NULL AND commission_locked_at IS NULL") : 0;
+$nfx = $canPay ? (int)val("SELECT COUNT(*) FROM transfers WHERE status='completed' AND completed_via='panel' AND created_at >= ? AND commission IS NOT NULL AND commission_locked_at IS NULL", [wallet_start()]) : 0;
 page_head('Commission withdrawals'); ?>
 <div class="spread"><div><h1>Commission withdrawals</h1><div class="muted">Requested → Under review → Approved → Processing → Paid. Every change is made by a person and logged. <?= $canReview || $canPay ? 'All sub-agents.' : 'Your team only.' ?></div></div>
   <?php if ($nfx): ?><a class="btn" href="/?p=withdrawals&v=fx"><?= $nfx ?> order(s) waiting for an FX rate</a><?php endif; ?></div>

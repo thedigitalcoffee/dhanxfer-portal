@@ -79,7 +79,7 @@ function db(): PDO {
     return $pdo;
 }
 
-const SCHEMA_VERSION = '11';
+const SCHEMA_VERSION = '12';
 /** True when the database is at the version this code expects. */
 function schema_current(): bool {
     try { return (string)db()->query("SELECT v FROM settings WHERE k='schema_version'")->fetchColumn() === SCHEMA_VERSION; } catch (Throwable $e) { return false; }
@@ -140,7 +140,11 @@ function migrate_locked(?string $ver): void {
         // v11: commission locked in CAD at the order-day rate; manager approval limit for withdrawals
         ['transfers', 'commission_fx_rate', 'DECIMAL(16,6) NULL'], ['transfers', 'commission_fx_date', 'DATE NULL'],
         ['transfers', 'commission_fx_source', 'VARCHAR(60) NULL'], ['transfers', 'commission_cad', 'DECIMAL(14,2) NULL'],
-        ['transfers', 'commission_locked_at', 'DATETIME NULL'], ['users', 'approval_limit_cad', 'DECIMAL(14,2) NULL']);
+        ['transfers', 'commission_locked_at', 'DATETIME NULL'], ['users', 'approval_limit_cad', 'DECIMAL(14,2) NULL'],
+        // v12: earnings only from orders completed in the panel; two-person manual FX; reconciliation and payment controls
+        ['transfers', 'completed_via', 'VARCHAR(10) NULL'], ['transfers', 'fx_proposed_rate', 'DECIMAL(16,6) NULL'], ['transfers', 'fx_proposed_source', 'VARCHAR(60) NULL'],
+        ['transfers', 'fx_proposed_by', 'INT UNSIGNED NULL'], ['commission_withdrawals', 'paid_ref_norm', 'VARCHAR(60) NULL'],
+        ['commission_withdrawals', 'last_hash', 'CHAR(64) NULL']);
     foreach ($cols as [$t, $c, $def]) {
         if ($def === null) continue;
         $has = db()->prepare('SELECT 1 FROM information_schema.COLUMNS WHERE TABLE_SCHEMA=DATABASE() AND TABLE_NAME=? AND COLUMN_NAME=?');
@@ -187,6 +191,10 @@ function migrate_locked(?string $ver): void {
         foreach ([90, 60, 30, 7, 0] as $d) foreach (['email', 'staff'] as $ch) db()->prepare('INSERT IGNORE INTO reminder_rules (offset_days, channel) VALUES (?, ?)')->execute([$d, $ch]);
     }
     foreach (COMPLIANCE_DEFAULTS as $k => $v) db()->prepare('INSERT IGNORE INTO settings (k, v) VALUES (?, ?)')->execute([$k, $v]);
+    // v11/12: the wallet credits only orders submitted from this moment; earlier commission was settled outside the panel
+    db()->prepare('INSERT IGNORE INTO settings (k, v) VALUES (?, ?)')->execute(['wallet_start', date('Y-m-d H:i:s')]);
+    $ix = db()->query("SELECT 1 FROM information_schema.STATISTICS WHERE TABLE_SCHEMA=DATABASE() AND TABLE_NAME='commission_withdrawals' AND INDEX_NAME='paid_ref_norm'")->fetchColumn();
+    if (!$ix) db()->exec('ALTER TABLE commission_withdrawals ADD UNIQUE KEY paid_ref_norm (paid_ref_norm)');
     if (!(int)db()->query("SELECT COUNT(*) FROM role_permissions WHERE perm='beneficiaries.manage'")->fetchColumn()) {
         $ins = db()->prepare('INSERT IGNORE INTO role_permissions (role, perm) VALUES (?, ?)');
         foreach (['admin' => ['beneficiaries.manage'], 'staff' => ['beneficiaries.manage'], 'compliance' => ['beneficiaries.manage', 'beneficiaries.review']] as $role => $ps) foreach ($ps as $perm) $ins->execute([$role, $perm]);

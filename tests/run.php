@@ -605,11 +605,12 @@ ok(!(int)$re($sx['id'])['agent_can_clients'] && (int)$re($sx['id'])['agent_can_t
 // ---- 23. commission in CAD, wallet and manual withdrawals ----
 require_once __DIR__ . '/../inc/wallet.php';
 $wa = mkuser('agent', 'Wallet Agent'); q("UPDATE users SET email='wallet.agent@example.com' WHERE id=?", [$wa['id']]); $wa = $re($wa['id']); $acct = $re($acct['id']);
-$D = date('Y-m-d', strtotime('-2 days'));
+$D = today(); $acct2 = mkuser('accountant', 'Acct Two');
 q("INSERT INTO agent_commissions (agent_id, send_currency, receive_currency, per_unit) VALUES (?,?,?,?),(?,?,?,?),(?,?,?,?)", [$wa['id'], 'CAD', 'INR', 0.5, $wa['id'], 'USD', 'INR', 0.6, $wa['id'], 'CAD', 'USD', 0.01]);
+q("INSERT INTO agent_commissions (agent_id, send_currency, receive_currency, per_unit) VALUES (?, 'CAD', 'PKR', 2)", [$wa['id']]);
 q("INSERT INTO market_rates (rate_date, send_currency, receive_currency, rate, source) VALUES (?,?,?,?,?),(?,?,?,?,?) ON DUPLICATE KEY UPDATE rate=VALUES(rate)", [$D, 'CAD', 'INR', 60, 'test', $D, 'CAD', 'USD', 0.73, 'test']);
 $mkT = function (string $ref, float $amt, string $s, string $r, string $st, ?string $day = null) use ($wa, $D) {
-    q('INSERT INTO transfers (ref_no, client_name, agent_id, send_amount, send_currency, receive_currency, status, transfer_date) VALUES (?,?,?,?,?,?,?,?)', [$ref, 'Wallet Client', $wa['id'], $amt, $s, $r, $st, $day ?? $D]);
+    q('INSERT INTO transfers (ref_no, client_name, agent_id, send_amount, send_currency, receive_currency, status, transfer_date, completed_via) VALUES (?,?,?,?,?,?,?,?,?)', [$ref, 'Wallet Client', $wa['id'], $amt, $s, $r, $st, $day ?? $D, $st === 'completed' ? 'panel' : null]);
     $id = (int)db()->lastInsertId(); commission_lock($id); return $id;
 };
 $t1 = $mkT('W-1', 100000, 'CAD', 'INR', 'pending');
@@ -621,20 +622,29 @@ q("UPDATE market_rates SET rate=80 WHERE rate_date=? AND send_currency='CAD' AND
 q("UPDATE agent_commissions SET per_unit=0.9 WHERE agent_id=? AND send_currency='CAD' AND receive_currency='INR'", [$wa['id']]);
 commission_lock($t1); apply_commission($t1);
 ok((float)$tr($t1)['commission_cad'] == 833.33 && (float)$tr($t1)['commission'] == 50000.0, 'a locked order never changes when FX or the agent rate changes later');
-$t4 = $mkT('W-4', 1000, 'CAD', 'INR', 'completed', date('Y-m-d', strtotime('-40 days')));
-ok($tr($t4)['commission_locked_at'] === null && (float)$tr($t4)['commission'] == 900.0, 'without a market rate for the order day the CAD value is not guessed (waits for finance)');
-$thr = ''; try { commission_lock_manual($t4, $admin, '61.5', 'Bank of Canada', 'Rate of that day'); } catch (RuntimeException $ex) { $thr = $ex->getMessage(); }
-commission_lock_manual($t4, $acct, '61.5', 'Bank of Canada daily', 'Rate of that day from BoC');
-ok($thr !== '' && (float)$tr($t4)['commission_cad'] == 14.63 && str_contains($tr($t4)['commission_fx_source'], 'manual'), 'only finance can lock a missing order-day rate, with its source; it is logged');
+$t4 = $mkT('W-4', 1000, 'CAD', 'PKR', 'completed', date('Y-m-d', strtotime('-40 days')));
+ok($tr($t4)['commission_locked_at'] === null && (float)$tr($t4)['commission'] == 2000.0, 'without a market rate for the order day the CAD value is not guessed (waits for finance)');
+$thr = ''; try { commission_lock_manual($t4, $admin, '200', 'Bank of Canada', 'Rate of that day'); } catch (RuntimeException $ex) { $thr = $ex->getMessage(); }
+$thr2 = ''; try { commission_lock_manual($t4, $acct, '1e-9', 'Bank of Canada', 'Rate of that day'); } catch (RuntimeException $ex) { $thr2 = $ex->getMessage(); }
+$p1 = commission_lock_manual($t4, $acct, '200', 'Bank of Canada daily', 'Rate of that day from BoC');
+$thr3 = ''; try { commission_lock_manual($t4, $acct, '200', 'Bank of Canada daily', 'Confirming my own'); } catch (RuntimeException $ex) { $thr3 = $ex->getMessage(); }
+$thr4 = ''; try { commission_lock_manual($t4, $acct2, '150', 'Bank of Canada daily', 'Different number'); } catch (RuntimeException $ex) { $thr4 = $ex->getMessage(); }
+ok($thr !== '' && $thr2 !== '' && $p1 === 'proposed' && str_contains($thr3, 'different') && str_contains($thr4, 'match') && $tr($t4)['commission_locked_at'] === null, 'a missing rate needs finance: one person proposes, the same person cannot confirm, a different number is refused');
+commission_lock_manual($t4, $acct2, '200', 'Bank of Canada daily', 'Checked against BoC table');
+ok((float)$tr($t4)['commission_cad'] == 10.0 && str_contains($tr($t4)['commission_fx_source'], 'manual'), 'a second finance user confirms; the CAD value is locked and logged');
+$tOld = $mkT('W-OLD', 1000, 'CAD', 'INR', 'completed'); q("UPDATE transfers SET created_at=DATE_SUB(?, INTERVAL 1 DAY), commission=NULL, commission_locked_at=NULL, commission_cad=NULL WHERE id=?", [wallet_start(), $tOld]);
+$tDirect = $mkT('W-DIRECT', 2000, 'CAD', 'INR', 'completed'); q("UPDATE transfers SET completed_via=NULL WHERE id=?", [$tDirect]);
+wallet_sync((int)$wa['id']);
+ok(!val('SELECT 1 FROM commission_ledger WHERE transfer_id IN (?,?)', [$tOld, $tDirect]) && $tr($tOld)['commission'] === null, 'orders from before the wallet started, or saved straight as completed, are never credited (no double payment of settled commission)');
 foreach ([$t1, $t2, $t3] as $id) q("UPDATE transfers SET status='accepted' WHERE id=?", [$id]);
 wallet_sync((int)$wa['id']);
-ok(wallet_balance((int)$wa['id'])['available'] == 14.63 && wallet_balance((int)$wa['id'])['pending'] == 980.32, 'accepted orders are shown as not yet earned; only completed orders count');
-foreach ([$t1, $t2, $t3] as $id) q("UPDATE transfers SET status='completed' WHERE id=?", [$id]);
+ok(wallet_balance((int)$wa['id'])['available'] == 10.0 && wallet_balance((int)$wa['id'])['pending'] == 980.32, 'accepted orders are shown as not yet earned; only completed orders count');
+foreach ([$t1, $t2, $t3] as $id) q("UPDATE transfers SET status='completed', completed_via='panel' WHERE id=?", [$id]);
 wallet_sync((int)$wa['id']); wallet_sync((int)$wa['id']);
 $b = wallet_balance((int)$wa['id']);
-ok($b['available'] == 994.95 && (int)val("SELECT COUNT(*) FROM commission_ledger WHERE agent_id=? AND entry='earn'", [$wa['id']]) === 4, 'completed orders are credited once each, however often the wallet is refreshed');
+ok($b['available'] == 990.32 && (int)val("SELECT COUNT(*) FROM commission_ledger WHERE agent_id=? AND entry='earn'", [$wa['id']]) === 4, 'completed orders are credited once each, however often the wallet is refreshed');
 $cur = array_column(wallet_by_currency((int)$wa['id']), null, 'cur');
-ok(isset($cur['INR'], $cur['USD']) && (float)$cur['INR']['amount'] == 51500.0 && (float)$cur['USD']['amount'] == 100.0 && round((float)$cur['INR']['cad'] + (float)$cur['USD']['cad'], 2) == $b['earned'], 'earnings by currency and the consolidated CAD total');
+ok(isset($cur['INR'], $cur['USD'], $cur['PKR']) && (float)$cur['INR']['amount'] == 50600.0 && (float)$cur['USD']['amount'] == 100.0 && (float)$cur['PKR']['amount'] == 2000.0 && round(array_sum(array_column($cur, 'cad')), 2) == $b['earned'], 'earnings by currency and the consolidated CAD total');
 // requests: first minimum CAD 500, partial withdrawals, reservation
 $e1 = ''; try { wd_request($wa, '499.99', ''); } catch (RuntimeException $ex) { $e1 = $ex->getMessage(); }
 $e2 = ''; try { wd_request($wa, '995', ''); } catch (RuntimeException $ex) { $e2 = $ex->getMessage(); }
@@ -642,9 +652,9 @@ $e3 = ''; try { wd_request($wa, '600', 'send to account 12345678'); } catch (Run
 ok(str_contains($e1, '500') && str_contains($e2, 'available') && str_contains($e3, 'account'), 'first withdrawal needs CAD 500; never more than available; no account numbers in notes');
 $w1 = wd_request($wa, '600', 'First payout');
 $b = wallet_balance((int)$wa['id']);
-ok($b['available'] == 394.95 && $b['reserved'] == 600.0 && val('SELECT status FROM commission_withdrawals WHERE id=?', [$w1]) === 'requested', 'the requested amount is reserved at once (partial withdrawal; the rest stays available)');
+ok($b['available'] == 390.32 && $b['reserved'] == 600.0 && val('SELECT status FROM commission_withdrawals WHERE id=?', [$w1]) === 'requested', 'the requested amount is reserved at once (partial withdrawal; the rest stays available)');
 $e4 = ''; try { wd_request($wa, '500', ''); } catch (RuntimeException $ex) { $e4 = $ex->getMessage(); }
-ok($e4 !== '' && wallet_balance((int)$wa['id'])['available'] == 394.95, 'a second request cannot reserve money already reserved');
+ok($e4 !== '' && wallet_balance((int)$wa['id'])['available'] == 390.32, 'a second request cannot reserve money already reserved');
 $dup = false; try { q("INSERT INTO commission_ledger (agent_id, entry, amount_cad, withdrawal_id) VALUES (?, 'reserve', 600, ?)", [$wa['id'], $w1]); } catch (PDOException $ex) { $dup = true; }
 ok($dup, 'the ledger refuses a second reservation, release or payout for the same withdrawal');
 // who may change what
@@ -667,7 +677,7 @@ $e10 = ''; try { wd_transition($w1, 'paid', $acct, ['reason' => 'Paid by Interac
 ok(str_contains($e8, 'Confirm') && str_contains($e9, 'date') && str_contains($e10, 'reference'), 'Paid needs a payment confirmation, a real payment date and a reference number');
 wd_transition($w1, 'paid', $acct, ['reason' => 'Paid by Interac', 'confirm' => '1', 'payment_date' => today(), 'reference' => 'ETR-1001', 'method' => 'Interac']);
 $b = wallet_balance((int)$wa['id']);
-ok($wr($w1)['status'] === 'paid' && $wr($w1)['paid_reference'] === 'ETR-1001' && (int)$wr($w1)['paid_by'] === (int)$acct['id'] && $b['paid'] == 600.0 && $b['reserved'] == 0.0 && $b['available'] == 394.95, 'finance marks it Paid: payout recorded once, reservation cleared');
+ok($wr($w1)['status'] === 'paid' && $wr($w1)['paid_reference'] === 'ETR-1001' && (int)$wr($w1)['paid_by'] === (int)$acct['id'] && $b['paid'] == 600.0 && $b['reserved'] == 0.0 && $b['available'] == 390.32, 'finance marks it Paid: payout recorded once, reservation cleared');
 $e11 = ''; try { wd_transition($w1, 'paid', $acct, ['reason' => 'Pay again', 'confirm' => '1', 'payment_date' => today(), 'reference' => 'ETR-1002']); } catch (RuntimeException $ex) { $e11 = $ex->getMessage(); }
 ok($e11 !== '' && (int)val("SELECT COUNT(*) FROM commission_ledger WHERE withdrawal_id=? AND entry='paid'", [$w1]) === 1, 'a paid withdrawal cannot be paid twice');
 ok((int)val("SELECT COUNT(*) FROM audit WHERE action='email_sent' AND detail LIKE 'withdrawal_status%'") - $mails0 >= 4, 'the sub-agent is notified at each status change');
@@ -675,15 +685,17 @@ ok((int)val("SELECT COUNT(*) FROM audit WHERE action='email_sent' AND detail LIK
 ok(wd_minimum((int)$wa['id']) == 100.0, 'after the first paid withdrawal the minimum is CAD 100');
 $w2 = wd_request($re($wa['id']), '100', '');
 wd_transition($w2, 'rejected', $admin, ['reason' => 'Order under dispute']);
-ok(wallet_balance((int)$wa['id'])['available'] == 394.95 && (int)val("SELECT COUNT(*) FROM commission_ledger WHERE withdrawal_id=? AND entry='release'", [$w2]) === 1, 'a rejected withdrawal releases its reserved amount, once');
+ok(wallet_balance((int)$wa['id'])['available'] == 390.32 && (int)val("SELECT COUNT(*) FROM commission_ledger WHERE withdrawal_id=? AND entry='release'", [$w2]) === 1, 'a rejected withdrawal releases its reserved amount, once');
 $e12 = ''; try { wd_transition($w2, 'cancelled', $admin, ['reason' => 'Release twice']); } catch (RuntimeException $ex) { $e12 = $ex->getMessage(); }
-ok($e12 !== '' && wallet_balance((int)$wa['id'])['available'] == 394.95, 'a released withdrawal cannot be released again');
+ok($e12 !== '' && wallet_balance((int)$wa['id'])['available'] == 390.32, 'a released withdrawal cannot be released again');
 // manager: own team only, within the approval limit, never Paid
 q('UPDATE users SET manager_id=? WHERE id=?', [$mgr['id'], $wa['id']]);
 q('UPDATE users SET approval_limit_cad=50 WHERE id=?', [$mgr['id']]);
 $w3 = wd_request($re($wa['id']), '150', '');
 $mgrR = $re($mgr['id']);
-ok(in_array('under_review', wd_allowed($wr($w3), $mgrR), true) && !in_array('approved', wd_allowed($wr($w3), $mgrR), true) && wd_allowed($wr($w3), $re($mgr2['id'])) === [], 'a manager reviews only their team and cannot approve above their limit');
+ok(in_array('under_review', wd_allowed($wr($w3), $mgrR), true) && !in_array('approved', wd_allowed($wr($w3), $mgrR), true) && wd_allowed($wr($w3), $re($mgr2['id'])) === [], 'a manager reviews only their team; Requested cannot jump straight to Approved');
+wd_transition($w3, 'under_review', $mgrR, ['reason' => 'Looking at it']);
+ok(!in_array('approved', wd_allowed($wr($w3), $mgrR), true), 'a manager cannot approve above their limit');
 q('UPDATE users SET approval_limit_cad=200 WHERE id=?', [$mgr['id']]); $mgrR = $re($mgr['id']);
 wd_transition($w3, 'approved', $mgrR, ['reason' => 'Within my limit']);
 ok($wr($w3)['status'] === 'approved' && !in_array('processing', wd_allowed($wr($w3), $mgrR), true) && !in_array('paid', wd_allowed($wr($w3), $mgrR), true), 'within the limit the manager approves; processing and Paid stay with finance');
@@ -693,9 +705,11 @@ wd_transition($w3, 'failed', $acct, ['reason' => 'Bank returned the wire']);
 ok(wd_allowed($wr($w3), $acct) === [] && wallet_balance((int)$wa['id'])['reserved'] == 150.0, 'a failed payment keeps the money reserved and allows nothing until it is reconciled');
 $e13 = ''; try { wd_reconcile($w3, $acct, 'not_paid', 'short'); } catch (RuntimeException $ex) { $e13 = $ex->getMessage(); }
 wd_reconcile($w3, $acct, 'not_paid', 'Bank statement shows the wire returned on the same day');
-ok($e13 !== '' && in_array('processing', wd_allowed($wr($w3), $acct), true) && in_array('cancelled', wd_allowed($wr($w3), $acct), true) && !in_array('paid', wd_allowed($wr($w3), $acct), true), 'after reconciliation (money not paid) finance may retry or release, not mark Paid');
+$e15 = ''; try { wd_reconcile($w3, $acct2, 'paid', 'Changing the earlier reconciliation'); } catch (RuntimeException $ex) { $e15 = $ex->getMessage(); }
+ok($e13 !== '' && str_contains($e15, 'already') && $wr($w3)['reconcile_outcome'] === 'not_paid', 'a reconciliation is recorded once and cannot be flipped afterwards');
+ok(in_array('processing', wd_allowed($wr($w3), $acct2), true) && in_array('cancelled', wd_allowed($wr($w3), $acct2), true) && !in_array('paid', wd_allowed($wr($w3), $acct2), true) && !in_array('processing', wd_allowed($wr($w3), $acct), true), 'after reconciliation (money not paid) another finance user may retry or release; never mark Paid; the reconciler cannot retry');
 wd_transition($w3, 'cancelled', $acct, ['reason' => 'Agent will request again with new details']);
-ok(wallet_balance((int)$wa['id'])['available'] == 394.95 && wallet_balance((int)$wa['id'])['reserved'] == 0.0, 'cancelled after reconciliation: reserved money released');
+ok(wallet_balance((int)$wa['id'])['available'] == 390.32 && wallet_balance((int)$wa['id'])['reserved'] == 0.0, 'cancelled after reconciliation: reserved money released');
 // concurrency guard: a decision on a stale copy is refused
 $w4 = wd_request($re($wa['id']), '100', '');
 wd_transition($w4, 'under_review', $admin, ['reason' => 'First reviewer']);
@@ -705,6 +719,21 @@ ok($e14 !== '' && (int)val("SELECT COUNT(*) FROM withdrawal_events WHERE withdra
 q("UPDATE market_rates SET rate=100 WHERE send_currency='CAD' AND receive_currency='INR' AND rate_date=?", [$D]);
 ok(wallet_balance((int)$wa['id'])['earned'] == 994.95, 'balances use the locked CAD values; later FX changes have no effect');
 ok(wd_verify($w1) === null && (int)val('SELECT COUNT(*) FROM withdrawal_events WHERE withdrawal_id=?', [$w1]) === 5, 'each withdrawal has a complete, timestamped history of who changed what and why');
+$t5 = $mkT('W-5', 100000, 'CAD', 'INR', 'completed'); wallet_sync((int)$wa['id']);
+$w5 = wd_request($re($wa['id']), '100', ''); wd_transition($w5, 'under_review', $admin, ['reason' => 'Review it']);
+q("DELETE FROM withdrawal_events WHERE withdrawal_id=? ORDER BY id DESC LIMIT 1", [$w5]);
+ok(wd_verify($w5) === -1, 'removing the newest history rows is detected too');
+// reference numbers are compared without spaces and dashes; approval limits cannot be beaten by splitting
+$w6 = wd_request($re($wa['id']), '100', '');
+foreach ([['under_review', $admin], ['approved', $super]] as [$to6, $by6]) wd_transition($w6, $to6, $by6, ['reason' => 'Moving it on']);
+ok(!in_array('processing', wd_allowed($wr($w6), $super), true) && in_array('processing', wd_allowed($wr($w6), $acct), true), 'whoever approved a withdrawal (even the super admin) cannot also process or pay it');
+wd_transition($w6, 'processing', $acct, ['reason' => 'Moving it on']);
+$e16 = ''; try { wd_transition($w6, 'paid', $acct, ['reason' => 'Paid by Interac', 'confirm' => '1', 'payment_date' => today(), 'reference' => 'etr 1001']); } catch (RuntimeException $ex) { $e16 = $ex->getMessage(); }
+ok(str_contains($e16, 'already recorded'), 'the same payment reference written differently is still caught');
+q('UPDATE users SET approval_limit_cad=150 WHERE id=?', [$mgr['id']]); $mgrR = $re($mgr['id']);
+$w7 = wd_request($re($wa['id']), '100', ''); wd_transition($w7, 'under_review', $mgrR, ['reason' => 'Split part one']); wd_transition($w7, 'approved', $mgrR, ['reason' => 'Part one fine']);
+$w8 = wd_request($re($wa['id']), '100', ''); wd_transition($w8, 'under_review', $mgrR, ['reason' => 'Split part two']);
+ok(!in_array('approved', wd_allowed($wr($w8), $mgrR), true), 'splitting a large withdrawal into small ones does not get around the approval limit (30-day total)');
 q("UPDATE withdrawal_events SET reason='edited later' WHERE withdrawal_id=? AND to_status='approved'", [$w1]);
 ok(wd_verify($w1) !== null, 'editing the history outside the portal is detected');
 

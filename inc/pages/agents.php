@@ -80,7 +80,8 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
         }
         audit('commission_set', 'user', $target['id'], $target['name'] . ': ' . implode(', ', $changes));
         if (post('recalc') === '1') {
-            $ids = all("SELECT id FROM transfers WHERE agent_id=? AND status IN ('accepted','completed') AND commission IS NULL", [$target['id']]);
+            // never on completed orders (already earned or settled) or orders locked at submission
+            $ids = all("SELECT id FROM transfers WHERE agent_id=? AND status='accepted' AND commission IS NULL AND commission_locked_at IS NULL", [$target['id']]);
             foreach ($ids as $r) apply_commission((int)$r['id']);
             flash('Commission rates saved and applied to ' . count($ids) . ' earlier transfer(s) that had none.');
         } else flash('Commission rates saved. New accepted transfers use them.');
