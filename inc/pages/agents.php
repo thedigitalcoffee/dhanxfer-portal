@@ -99,7 +99,9 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
             // the short link follows the new login ID when that name is free; the old link keeps working until disabled
             $nu = one('SELECT * FROM users WHERE id=?', [$target['id']]);
             $msg = '';
-            if (!slug_problem($nu['username'], (int)$nu['id'])) { ref_link_create($nu, $nu['username'], (int)$u['id']); agent_event((int)$nu['id'], 'link_added', null, (int)$u['id'], 'New main link /r/' . $nu['username'] . ' after rename'); }
+            $own = one("SELECT * FROM referral_links WHERE slug=? AND agent_id=? AND status<>'retired'", [$nu['username'], $nu['id']]);
+            if ($own) { q('UPDATE referral_links SET is_primary=(id=?) WHERE agent_id=?', [$own['id'], $nu['id']]); agent_event((int)$nu['id'], 'link_added', null, (int)$u['id'], 'Main link back to /r/' . $nu['username'] . ' after rename'); }
+            elseif (!slug_problem($nu['username'], (int)$nu['id'])) { ref_link_create($nu, $nu['username'], (int)$u['id']); agent_event((int)$nu['id'], 'link_added', null, (int)$u['id'], 'New main link /r/' . $nu['username'] . ' after rename'); }
             else $msg = ' The short link name stays as it was (the new name is not available for links).';
             flash('Login ID and referral code changed. Clients and links from before still count for this sub-agent.' . $msg);
         }

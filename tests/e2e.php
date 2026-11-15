@@ -73,6 +73,7 @@ function e2e_cleanup(): void {
     if ($sa14) { $in14 = implode(',', array_map('intval', $sa14)); q("DELETE FROM referral_links WHERE agent_id IN ($in14)"); q("DELETE FROM agent_events WHERE agent_id IN ($in14)"); q("DELETE FROM password_resets WHERE user_id IN ($in14)"); q("DELETE FROM submissions WHERE agent_id IN ($in14)"); q("DELETE FROM agent_codes WHERE agent_id IN ($in14)"); }
     q("DELETE FROM users WHERE username IN ('e2e.legacy','e2e.staffx','e2e.v2owner','e2e.agentx','e2e.manager')"); q('DELETE FROM login_attempts');
     q("UPDATE users SET manager_id=NULL, account_status='active', active=1, agent_can_clients=1, agent_can_transfers=1 WHERE username IN ('test.agent1','test.agent2')");
+    q("DELETE FROM referral_links WHERE slug='test.agent1x'"); q("UPDATE referral_links l JOIN users u ON u.id=l.agent_id SET l.is_primary=(l.slug=u.username), l.status='active' WHERE u.username IN ('test.agent1','test.agent2')");
     $ids = array_column(all("SELECT id FROM clients WHERE name LIKE 'E2E %'"), 'id');
     if ($ids) { $in = implode(',', array_map('intval', $ids));
         foreach (['document_versions', 'client_documents', 'kyc_reviews', 'rekyc_cases', 'reminders', 'upload_requests', 'beneficiaries', 'beneficiary_events', 'client_otps'] as $t) q("DELETE FROM $t WHERE client_id IN ($in)");
@@ -402,7 +403,10 @@ ok(val('SELECT username FROM users WHERE id=?', [$a2['id']]) === 'test.agent2', 
 q("UPDATE clients SET kyc='Verified' WHERE id=?", [$kc]); q("UPDATE document_versions SET outcome='verified' WHERE client_id=?", [$kc]);
 $ag12->post("/?p=client_form&id=$kc", ['name' => 'E2E KYC Person Changed', 'phone' => '+1 416 555 7020', 'country' => 'Canada', 'office' => 'Canada', 'dob' => '1988-02-03', 'address' => '12 Main Street', 'city' => 'Toronto', 'postal' => 'M5H 2N2', 'consent' => '1', 'dupe_ok' => '1']);
 ok(val('SELECT kyc FROM clients WHERE id=?', [$kc]) === 'Pending', 'a sub-agent changing the name of a verified client sends it back to KYC review');
+require_once __DIR__ . '/../inc/agents.php';
+ok(ref_resolve('test.agent1x')['id'] == $a1['id'] && ref_resolve('test.agent1')['id'] == $a1['id'], 'after a rename the new short link works and the old /r/ link still credits the same agent');
 q("UPDATE users SET username='test.agent1' WHERE id=?", [$a1['id']]); q("UPDATE agent_codes SET is_current=IF(code='test.agent1',1,0) WHERE agent_id=?", [$a1['id']]); q("DELETE FROM agent_codes WHERE code='test.agent1x'");
+q("DELETE FROM referral_links WHERE slug='test.agent1x'"); q("UPDATE referral_links SET is_primary=1, status='active' WHERE slug='test.agent1'");
 q("UPDATE users SET role='admin' WHERE username='test.admin'");
 
 // ---- 13. beneficiaries, one identity per sender, one-time codes ----
