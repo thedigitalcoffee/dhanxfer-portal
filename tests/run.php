@@ -661,9 +661,9 @@ $mails0 = (int)val("SELECT COUNT(*) FROM audit WHERE action='email_sent' AND det
 wd_transition($w1, 'under_review', $admin, ['reason' => 'Checking the orders']);
 wd_transition($w1, 'approved', $admin, ['reason' => 'Orders verified']);
 wd_transition($w1, 'processing', $acct, ['reason' => 'Sent by Interac']);
-$e8 = ''; try { wd_transition($w1, 'paid', $acct, ['reason' => 'Paid', 'payment_date' => today(), 'reference' => 'ETR-1001']); } catch (RuntimeException $ex) { $e8 = $ex->getMessage(); }
-$e9 = ''; try { wd_transition($w1, 'paid', $acct, ['reason' => 'Paid', 'confirm' => '1', 'payment_date' => date('Y-m-d', strtotime('+2 days')), 'reference' => 'ETR-1001']); } catch (RuntimeException $ex) { $e9 = $ex->getMessage(); }
-$e10 = ''; try { wd_transition($w1, 'paid', $acct, ['reason' => 'Paid', 'confirm' => '1', 'payment_date' => today(), 'reference' => '']); } catch (RuntimeException $ex) { $e10 = $ex->getMessage(); }
+$e8 = ''; try { wd_transition($w1, 'paid', $acct, ['reason' => 'Paid by Interac', 'payment_date' => today(), 'reference' => 'ETR-1001']); } catch (RuntimeException $ex) { $e8 = $ex->getMessage(); }
+$e9 = ''; try { wd_transition($w1, 'paid', $acct, ['reason' => 'Paid by Interac', 'confirm' => '1', 'payment_date' => date('Y-m-d', strtotime('+2 days')), 'reference' => 'ETR-1001']); } catch (RuntimeException $ex) { $e9 = $ex->getMessage(); }
+$e10 = ''; try { wd_transition($w1, 'paid', $acct, ['reason' => 'Paid by Interac', 'confirm' => '1', 'payment_date' => today(), 'reference' => '']); } catch (RuntimeException $ex) { $e10 = $ex->getMessage(); }
 ok(str_contains($e8, 'Confirm') && str_contains($e9, 'date') && str_contains($e10, 'reference'), 'Paid needs a payment confirmation, a real payment date and a reference number');
 wd_transition($w1, 'paid', $acct, ['reason' => 'Paid by Interac', 'confirm' => '1', 'payment_date' => today(), 'reference' => 'ETR-1001', 'method' => 'Interac']);
 $b = wallet_balance((int)$wa['id']);
