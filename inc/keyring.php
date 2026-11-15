@@ -194,6 +194,45 @@ function keyring_rewrap(string $kid): void {
     keyring_key('', true);
     if (keyring_key($kid) !== $dek) throw new RuntimeException('Rewrap check failed.');
 }
+/**
+ * Offline escrow copy of a data key, sealed with a passphrase (Argon2id via libsodium, else PBKDF2-SHA256 600k).
+ * The file and the passphrase are kept by the owner away from the server: they rebuild the key if Cloud KMS
+ * access or the key ring is ever lost. Never store the passphrase on the server.
+ */
+function kr_pass_key(string $pass, string $salt, string $alg): string {
+    if (mb_strlen($pass) < 16) throw new RuntimeException('The escrow passphrase must be at least 16 characters.');
+    return $alg === 'argon2id'
+        ? sodium_crypto_pwhash(32, $pass, substr($salt, 0, SODIUM_CRYPTO_PWHASH_SALTBYTES), SODIUM_CRYPTO_PWHASH_OPSLIMIT_MODERATE, SODIUM_CRYPTO_PWHASH_MEMLIMIT_MODERATE, SODIUM_CRYPTO_PWHASH_ALG_ARGON2ID13)
+        : hash_pbkdf2('sha256', $pass, $salt, 600000, 32, true);
+}
+function keyring_escrow_export(string $kid, string $pass): string {
+    $dek = keyring_key($kid);
+    $alg = function_exists('sodium_crypto_pwhash') ? 'argon2id' : 'pbkdf2';
+    $salt = random_bytes(16);
+    return json_encode(['dhanxfer_escrow' => 1, 'kid' => $kid, 'alg' => $alg, 'salt' => base64_encode($salt), 'created' => date('c'),
+        'sealed' => base64_encode(aead_seal($dek, kr_pass_key($pass, $salt, $alg), 'dhanxfer-escrow:' . $kid)),
+        'check' => keyring()['keys'][$kid]['check'] ?? null], JSON_PRETTY_PRINT);
+}
+/** Rebuilds a lost key ring entry from an escrow file: the same data key, wrapped again by a (new) provider. */
+function keyring_escrow_import(string $json, string $pass, string $provider, ?string $kmsKey = null): string {
+    $e = json_decode($json, true);
+    if (!is_array($e) || ($e['dhanxfer_escrow'] ?? 0) !== 1 || !preg_match('/^k[0-9]{1,4}$/', (string)($e['kid'] ?? ''))) throw new RuntimeException('Not a DhanXfer escrow file.');
+    $kid = $e['kid'];
+    $dek = aead_open((string)base64_decode((string)$e['sealed'], true), kr_pass_key($pass, (string)base64_decode((string)$e['salt'], true), (string)$e['alg']), 'dhanxfer-escrow:' . $kid);
+    if ($dek === null || strlen($dek) !== 32) throw new RuntimeException('Wrong passphrase or damaged escrow file.');
+    $entry = match ($provider) {
+        'local'  => ['provider' => 'local', 'wrapped' => kr_local_wrap($kid, $dek)],
+        'gcpkms' => ['provider' => 'gcpkms', 'kms_key' => (string)$kmsKey, 'wrapped' => kms_wrap($kid, (string)$kmsKey, $dek)],
+        default  => throw new RuntimeException('Provider must be local or gcpkms.'),
+    };
+    if (($entry['provider'] === 'local' ? kr_local_unwrap($kid, $entry['wrapped']) : kms_unwrap($kid, $entry)) !== $dek) throw new RuntimeException('The restored key did not unwrap correctly; nothing was saved.');
+    $entry += ['created' => $e['created'] ?? date('c'), 'restored' => date('c'), 'check' => substr(hash_hmac('sha256', 'dhanxfer-key-check', $dek), 0, 16)];
+    $r = keyring(true);
+    if (isset($r['keys'][$kid]['check']) && !hash_equals($r['keys'][$kid]['check'], $entry['check'])) throw new RuntimeException('This escrow file belongs to a different key with the same id.');
+    $r['keys'][$kid] = $entry;
+    keyring_save($r);
+    return $kid;
+}
 /** Status for the panel and tools: ids, providers, which is active. Never key material. */
 function keyring_status(): array {
     $r = keyring(true); $out = [];

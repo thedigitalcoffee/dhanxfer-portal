@@ -523,7 +523,7 @@ $adm14->post('/?p=agents', ['act' => 'create', 'role' => 'agent', 'name' => 'E2E
 ok(!val("SELECT 1 FROM users WHERE username='admin'"), 'a reserved name cannot become a sub-agent login or link');
 // activation (password chosen through the one-time link) makes the account and link active
 $axPw = 'E2E-Agent-X-' . bin2hex(random_bytes(4));
-$tok = bin2hex(random_bytes(16)); q('INSERT INTO password_resets (user_id, token_hash, expires_at, purpose) VALUES (?,?,DATE_ADD(NOW(), INTERVAL 1 HOUR),?)', [$ax['id'], hash('sha256', $tok), 'activate']);
+$tok = bin2hex(random_bytes(24)); q('INSERT INTO password_resets (user_id, token_hash, expires_at, purpose) VALUES (?,?,DATE_ADD(NOW(), INTERVAL 1 HOUR),?)', [$ax['id'], hash('sha256', $tok), 'activate']);
 $act14 = new Browser(); $act14->req('/reset.php?t=' . $tok); $act14->req('/reset.php?t=' . $tok, ['csrf' => $act14->csrf(), 'password' => $axPw, 'password2' => $axPw]);
 ok(val('SELECT account_status FROM users WHERE id=?', [$ax['id']]) === 'active', 'activation link sets the password and makes the sub-agent active');
 $T['e2e.agentx'] = ['password' => $axPw];

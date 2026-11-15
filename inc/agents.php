@@ -55,6 +55,12 @@ function agent_reason(string $r): string {
     return mb_substr($r, 0, 255);
 }
 
+/** Was a restriction set by someone above a manager (team.agents, or not allowed to control agents at all, e.g. compliance)? */
+function agent_restricted_by_admin(int $byId): bool {
+    if (!$byId) return false;
+    $r = one('SELECT role FROM users WHERE id=?', [$byId]);
+    return $r && agent_scope(['id' => $byId, 'role' => $r['role']]) !== 'assigned';
+}
 /* ---------- account status ---------- */
 /**
  * Changes a sub-agent's status. Suspending or deactivating ends every session at once (session version),
@@ -73,6 +79,7 @@ function agent_set_status(array $agent, string $to, string $reason, array $by): 
     ];
     if (!isset($allowed[$to]) || !in_array($from, $allowed[$to], true)) throw new RuntimeException('That status change is not possible from ' . (AGENT_STATUSES[$from] ?? $from) . '.');
     if ($to === 'active' && $from === 'deactivated' && agent_scope($by) !== 'all') throw new RuntimeException('Only an admin can bring back a deactivated sub-agent.');
+    if ($to === 'active' && agent_scope($by) !== 'all' && agent_restricted_by_admin((int)($agent['status_changed_by'] ?? 0))) throw new RuntimeException('An admin or compliance suspended this sub-agent, so only an admin can lift it.');
     // an agent who never set a password goes back to "pending activation", not "active"
     $new = $to === 'active' && !$agent['last_login'] ? 'pending' : $to;
     $n = q('UPDATE users SET account_status=?, active=?, session_version=session_version+' . ($to === 'active' ? '0' : '1') . ', status_reason=?, status_changed_at=NOW(), status_changed_by=? WHERE id=? AND role=? AND account_status=?',
@@ -106,7 +113,8 @@ function slug_clean(string $s): string { return mb_strtolower(trim($s)); }
 /** Why a short name cannot be used by this agent (null = free). Names are never reused by another agent. */
 function slug_problem(string $slug, int $agentId): ?string {
     if (!preg_match('/^[a-z0-9](?:[a-z0-9._-]{1,28}[a-z0-9])$/', $slug)) return 'Link name: 3–30 letters or numbers (dot, dash or underscore allowed inside).';
-    if (in_array($slug, RESERVED_SLUGS, true) || preg_match('/^(admin|dhanxfer|support|official|staff)/', $slug)) return 'That name is reserved.';
+    $flat = preg_replace('/[._-]/', '', $slug);
+    if (in_array($slug, RESERVED_SLUGS, true) || in_array($flat, RESERVED_SLUGS, true) || preg_match('/^(admin|support|official|staff|help)/', $flat) || preg_match('/dhan.?x.?fe?r|admin|official|helpdesk|support|security/', $flat)) return 'That name is reserved.';
     $owner = val('SELECT agent_id FROM referral_links WHERE slug=?', [$slug]);
     if ($owner !== null && (int)$owner !== $agentId) return 'That link name belongs to another sub-agent (names are never reused).';
     if ($owner !== null) return 'That link name was used before by this sub-agent. Choose a new one.';
@@ -137,6 +145,7 @@ function ref_link_set(array $agent, array $link, string $to, string $reason, arr
     $reason = agent_reason($reason);
     if ($link['status'] === 'retired') throw new RuntimeException('A retired link stays retired. Make a new link instead.');
     if (!in_array($to, ['active', 'disabled'], true) || $link['status'] === $to) throw new RuntimeException('Nothing to change.');
+    if ($to === 'active' && agent_scope($by) !== 'all' && agent_restricted_by_admin((int)($link['changed_by'] ?? 0))) throw new RuntimeException('An admin switched this link off, so only an admin can switch it back on.');
     q('UPDATE referral_links SET status=?, reason=?, changed_by=?, changed_at=NOW() WHERE id=? AND status=?', [$to, $reason, $by['id'], $link['id'], $link['status']]);
     agent_event((int)$agent['id'], $to === 'active' ? 'link_enabled' : 'link_disabled', $reason, (int)$by['id'], '/r/' . $link['slug']);
 }

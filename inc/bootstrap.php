@@ -136,7 +136,7 @@ function migrate_locked(?string $ver): void {
         ['users', 'status_changed_at', 'DATETIME NULL'], ['users', 'status_changed_by', 'INT UNSIGNED NULL'],
         ['users', 'manager_id', 'INT UNSIGNED NULL'], ['users', 'ref_epoch', 'INT NOT NULL DEFAULT 0'],
         ['users', 'agent_can_clients', 'TINYINT(1) NOT NULL DEFAULT 1'], ['users', 'agent_can_transfers', 'TINYINT(1) NOT NULL DEFAULT 1'],
-        ['submissions', 'ref_link_id', 'INT UNSIGNED NULL']);
+        ['submissions', 'ref_link_id', 'INT UNSIGNED NULL'], ['intake_drafts', 'ref_link_id', 'INT UNSIGNED NULL']);
     foreach ($cols as [$t, $c, $def]) {
         if ($def === null) continue;
         $has = db()->prepare('SELECT 1 FROM information_schema.COLUMNS WHERE TABLE_SCHEMA=DATABASE() AND TABLE_NAME=? AND COLUMN_NAME=?');
@@ -202,6 +202,9 @@ function migrate_locked(?string $ver): void {
     }
     // v4: encrypt ID and account numbers that were saved before encryption existed.
     // Without a key the version is not recorded, so this runs again until the key is in place.
+    // v10 (needs no key): switched-off accounts are "deactivated"; every sub-agent gets a short link named after their login ID
+    require_once __DIR__ . '/agents.php';
+    agents_migrate_v10();
     if (!enc_ready()) return;
     $jobs = [
         ['clients', 'id_number', "id_number IS NOT NULL AND id_number<>'' AND id_number NOT LIKE 'enc:%'", true],
@@ -227,9 +230,6 @@ function migrate_locked(?string $ver): void {
         // v8: existing beneficiaries were never screened: they wait for review; duplicate-check keys added
         require_once __DIR__ . '/beneficiary.php';
         benef_migrate_v8();
-        // v10: switched-off accounts are "deactivated"; every sub-agent gets a short link named after their login ID
-        require_once __DIR__ . '/agents.php';
-        agents_migrate_v10();
         db()->prepare("REPLACE INTO settings (k, v) VALUES ('schema_version', ?)")->execute([SCHEMA_VERSION]);
         db()->commit();
     } catch (Throwable $e) { if (db()->inTransaction()) db()->rollBack(); throw $e; }

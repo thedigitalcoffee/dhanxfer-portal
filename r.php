@@ -8,9 +8,10 @@ header('Cache-Control: no-store');
 header('Referrer-Policy: no-referrer');
 $ip = client_ip();
 $slug = mb_substr((string)($_GET['s'] ?? ''), 0, 60);
-$limited = (int)val("SELECT COUNT(*) FROM login_attempts WHERE ip=? AND username='ref-link' AND at > (NOW() - INTERVAL 10 MINUTE)", [$ip]) >= 60;
+$limited = (int)val("SELECT COUNT(*) FROM login_attempts WHERE ip=? AND username='ref-link' AND at > (NOW() - INTERVAL 10 MINUTE)", [$ip]) >= 120;
+if ($limited) { header('Location: /register', true, 302); exit; } // too many look-ups: no new referral, the earlier one is left as it was
 q("INSERT INTO login_attempts (ip, username) VALUES (?, 'ref-link')", [$ip]);
-$hit = $limited ? null : ref_resolve($slug);
+$hit = ref_resolve($slug);
 if ($hit) {
     $_SESSION['ref_agent'] = (int)$hit['id'];
     $_SESSION['ref_link'] = (int)$hit['link_id'];

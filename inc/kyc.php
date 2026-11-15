@@ -251,6 +251,9 @@ function agent_rename(array $agent, string $new, int $by): void {
     if (val('SELECT 1 FROM users WHERE username=? AND id<>?', [$new, $agent['id']])) throw new RuntimeException('That login ID is taken.');
     $owner = val('SELECT agent_id FROM agent_codes WHERE code=?', [$new]);
     if ($owner !== null && (int)$owner !== (int)$agent['id']) throw new RuntimeException('That name was used by another sub-agent before and stays reserved for them.');
+    require_once __DIR__ . '/agents.php';
+    $slugOwner = val('SELECT agent_id FROM referral_links WHERE slug=?', [$new]);
+    if (($slugOwner !== null && (int)$slugOwner !== (int)$agent['id']) || in_array($new, RESERVED_SLUGS, true)) throw new RuntimeException('That name is a referral link of another sub-agent or a reserved word.');
     db()->beginTransaction();
     try {
         agent_code_register((int)$agent['id'], $new);

@@ -7,7 +7,7 @@ strict_csp();
 
 $uid = (int)($_SESSION['mfa_uid'] ?? 0);
 if (!$uid || time() - (int)($_SESSION['mfa_at'] ?? 0) > 300) { unset($_SESSION['mfa_uid']); flash('Please log in again.', 'warn'); redirect('/login.php'); }
-$user = one('SELECT * FROM users WHERE id=? AND active=1', [$uid]);
+$user = one("SELECT * FROM users WHERE id=? AND active=1 AND account_status='active'", [$uid]);
 if (!$user || !$user['mfa_enabled']) { unset($_SESSION['mfa_uid']); redirect('/login.php'); }
 $err = '';
 if ($_SERVER['REQUEST_METHOD'] === 'POST') {

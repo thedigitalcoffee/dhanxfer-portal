@@ -6,6 +6,8 @@
 //   php tools/keyring.php new k1 gcpkms projects/P/locations/L/keyRings/R/cryptoKeys/C   (needs kms_enabled)
 //   php tools/keyring.php activate k1                        (new values and files use k1)
 //   php tools/keyring.php rewrap k1                          (after the KMS key rotated: wrap again with its new primary)
+//   DX_ESCROW_PASS='…' php tools/keyring.php escrow-export k1 /path/escrow-k1.json   (offline copy for the owner)
+//   DX_ESCROW_PASS='…' php tools/keyring.php escrow-import /path/escrow-k1.json gcpkms projects/…/cryptoKeys/C
 //   php tools/keyring.php reseal [--write]                   (re-seal older values/files with the active key; dry run without --write)
 if (PHP_SAPI !== 'cli') { http_response_code(404); exit; }
 $_SERVER['REMOTE_ADDR'] = 'cli';
@@ -21,6 +23,14 @@ try {
         case 'activate': keyring_activate((string)($a[1] ?? '')); audit_write(null, 'key_activated', 'system', null, (string)$a[1], 'cli'); echo "active: ", $a[1], "\n"; break;
         case 'rewrap': keyring_rewrap((string)($a[1] ?? '')); audit_write(null, 'key_rewrapped', 'system', null, (string)$a[1], 'cli'); echo "rewrapped ", $a[1], "\n"; break;
         case 'reseal': $r = reseal_run(in_array('--write', $a, true), 200, fn($l) => print("$l\n")); echo json_encode($r['files']), "\nfailed: ", $r['failed'], "\n"; exit($r['failed'] ? 1 : 0);
+        case 'escrow-export': // DX_ESCROW_PASS must be set in the environment for this one command; the file goes to the owner, then is deleted here
+            $pass = (string)getenv('DX_ESCROW_PASS'); $out = (string)($a[2] ?? '');
+            if ($out === '' || file_exists($out)) throw new RuntimeException('Give a new output file path.');
+            file_put_contents($out, keyring_escrow_export((string)($a[1] ?? ''), $pass)); chmod($out, 0600);
+            audit_write(null, 'key_escrow_exported', 'system', null, (string)$a[1], 'cli'); echo "escrow file written: $out (move it off the server now)\n"; break;
+        case 'escrow-import': // php tools/keyring.php escrow-import FILE local|gcpkms [KMS key name]
+            $kid = keyring_escrow_import((string)file_get_contents((string)($a[1] ?? '')), (string)getenv('DX_ESCROW_PASS'), (string)($a[2] ?? ''), $a[3] ?? null);
+            audit_write(null, 'key_escrow_imported', 'system', null, $kid, 'cli'); echo "restored $kid from escrow\n"; break;
         default: echo "unknown command\n"; exit(2);
     }
 } catch (Throwable $e) { fwrite(STDERR, 'Error: ' . $e->getMessage() . "\n"); exit(1); }

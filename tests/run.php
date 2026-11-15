@@ -587,6 +587,18 @@ $thr = ''; try { ref_link_set($sy, one('SELECT * FROM referral_links WHERE id=?'
 ok($thr !== '', "a link can only be changed through its own agent");
 $thr = ''; try { ref_link_set($sy, ref_primary((int)$sy['id']), 'disabled', 'Not my team', $mgr); } catch (RuntimeException $ex) { $thr = $ex->getMessage(); }
 ok($thr !== '' && ref_primary((int)$sy['id'])['status'] === 'active', "a manager cannot switch off another team's link");
+// a manager cannot lift what an admin restricted
+agent_set_status($re($sy['id']), 'suspended', 'Compliance hold placed by admin', $admin);
+q('UPDATE users SET manager_id=? WHERE id=?', [$mgr['id'], $sy['id']]);
+$thr = ''; try { agent_set_status($re($sy['id']), 'active', 'Manager lifts it', $mgr); } catch (RuntimeException $ex) { $thr = $ex->getMessage(); }
+ok(str_contains($thr, 'only an admin') && $re($sy['id'])['account_status'] === 'suspended', 'a manager cannot lift a suspension an admin placed');
+$ly = ref_primary((int)$sy['id']); ref_link_set($re($sy['id']), $ly, 'disabled', 'Admin switched off the link', $admin);
+$thr = ''; try { ref_link_set($re($sy['id']), ref_primary((int)$sy['id']), 'active', 'Manager turns it on', $mgr); } catch (RuntimeException $ex) { $thr = $ex->getMessage(); }
+ok($thr !== '' && ref_primary((int)$sy['id'])['status'] === 'disabled', 'a manager cannot switch back on a link an admin switched off');
+q('UPDATE users SET manager_id=NULL WHERE id=?', [$sy['id']]);
+ok(slug_problem('dhan-xfer', (int)$sx['id']) !== null && slug_problem('my.dhanxfer', (int)$sx['id']) !== null && slug_problem('help_desk', (int)$sx['id']) !== null && slug_problem('rahul', (int)$sx['id']) === null, 'look-alike brand and staff names are refused; ordinary names are fine');
+$thr = ''; try { agent_rename($re($sy['id']), 'shortx.new', (int)$super['id']); } catch (RuntimeException $ex) { $thr = $ex->getMessage(); }
+ok($thr !== '' && $re($sy['id'])['username'] !== 'shortx.new', "an agent cannot be renamed to another agent's link name");
 agent_set_limits($sx, false, true, 'No new clients until training', $mgr);
 ok(!(int)$re($sx['id'])['agent_can_clients'] && (int)$re($sx['id'])['agent_can_transfers'], 'per-agent limits are saved (checked on every request to those pages)');
 
@@ -675,7 +687,14 @@ ok(keyring()['keys']['k2']['wrapped'] !== $wrappedBefore && keyring_key('k2') ==
 $GLOBALS['KMS_HTTP'] = $GLOBALS['KMS_HTTP_PREV']; $kmsDown = true; keyring_key('', true);
 $downErr = ''; try { dec($v3); } catch (Throwable $ex) { $downErr = $ex->getMessage(); }
 ok(!enc_ready() && str_contains($downErr, 'HTTP 503') && dec($v1) === 'KR-PLAIN-1', 'if KMS cannot be reached, values sealed with the KMS key cannot be opened (clear error, nothing leaked); k0 values still open');
-$kmsDown = false;
+$kmsDown = false; keyring_key('', true);
+// offline escrow: the data key can be rebuilt from the owner's file + passphrase if the key ring or KMS access is lost
+$esc = keyring_escrow_export('k1', 'correct horse battery staple 77'); $dekK1 = keyring_key('k1');
+ok(!str_contains($esc, base64_encode($dekK1)) && str_contains($esc, '"alg"'), 'escrow file holds the data key only sealed with the passphrase');
+$wrongPass = ''; try { keyring_escrow_import($esc, 'wrong passphrase entirely 00', 'local'); } catch (Throwable $ex) { $wrongPass = $ex->getMessage(); }
+$ringJ2 = json_decode((string)file_get_contents($krFile), true); unset($ringJ2['keys']['k1']); $ringJ2['active'] = 'k0'; file_put_contents($krFile, json_encode($ringJ2)); keyring(true); keyring_key('', true);
+keyring_escrow_import($esc, 'correct horse battery staple 77', 'local'); keyring_key('', true);
+ok(str_contains($wrongPass, 'Wrong passphrase') && keyring_key('k1') === $dekK1 && dec($v2) === 'KR-PLAIN-2', 'after losing the key ring entry, the escrow file + passphrase restore the same key and the data opens again');
 $CONFIG['local_kek'] = base64_encode(random_bytes(32)); keyring_key('', true);
 $wrongKek = ''; try { keyring_key('k1'); } catch (Throwable $ex) { $wrongKek = $ex->getMessage(); }
 ok(str_contains($wrongKek, 'could not be unwrapped'), 'a wrong key-encryption key is detected, never used');

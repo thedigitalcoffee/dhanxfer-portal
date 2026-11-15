@@ -11,7 +11,7 @@ strict_csp();
 // The install key is typed into the form (POST), so it never appears in web server logs.
 if (empty($CONFIG['install_key'])) { http_response_code(404); exit('Not found'); }
 migrate();
-$supers = all("SELECT * FROM users WHERE role='super_admin' AND active=1");
+$supers = all("SELECT * FROM users WHERE role='super_admin' AND active=1 AND account_status='active'");
 $resume = $supers && !array_filter($supers, fn($x) => (int)$x['mfa_enabled'] === 1); // owner made but two-step never finished
 if ($supers && !$resume) { http_response_code(404); exit('Setup is already complete. Log in at /login.php'); }
 $fresh = !$resume && (int)val('SELECT COUNT(*) FROM users') === 0;
@@ -35,7 +35,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
         q("INSERT INTO login_attempts (ip, username) VALUES (?, 'install')", [client_ip()]);
         $err[] = 'The install key is wrong.';
     } elseif ($resume) {
-        $u = one("SELECT * FROM users WHERE username=? AND role='super_admin' AND active=1 AND mfa_enabled=0", [mb_strtolower(post('username'))]);
+        $u = one("SELECT * FROM users WHERE username=? AND role='super_admin' AND active=1 AND account_status='active' AND mfa_enabled=0", [mb_strtolower(post('username'))]);
         if ($u && password_verify((string)($_POST['password'] ?? ''), $u['password_hash'])) {
             audit_write((int)$u['id'], 'mfa_enroll_started', 'user', $u['id'], 'Owner resumed setup with install key + password', client_ip());
             start_enrollment((int)$u['id'], false);
@@ -58,7 +58,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
             start_enrollment($id, false);
         }
     } else {
-        $u = one("SELECT * FROM users WHERE username=? AND active=1 AND role='admin'", [mb_strtolower(post('username'))]);
+        $u = one("SELECT * FROM users WHERE username=? AND active=1 AND account_status='active' AND role='admin'", [mb_strtolower(post('username'))]);
         $ok = $u && password_verify((string)($_POST['password'] ?? ''), $u['password_hash']);
         if ($ok && $u['mfa_enabled']) {
             if ($lock = mfa_locked((int)$u['id'])) { $ok = false; $err[] = $lock; }

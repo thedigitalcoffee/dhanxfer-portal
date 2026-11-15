@@ -52,7 +52,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && post('act') !== 'reveal') {
             redirect('/?p=submissions&id=' . $s['id']);
         }
         $agentId = (int)post('agent_id') ?: null;
-        if ($agentId && !val("SELECT 1 FROM users WHERE id=? AND role='agent'", [$agentId])) $agentId = null;
+        if ($agentId && !val("SELECT 1 FROM users WHERE id=? AND role='agent' AND active=1 AND account_status='active'", [$agentId])) $agentId = null; // new credit only to active agents
         // a referral proven by an agent link is fixed: it cannot be moved to another agent or removed here
         if ((int)$s['ref_verified'] === 1 && $s['agent_id']) $agentId = (int)$s['agent_id'];
         try { $cid = insert_client($v, ['kyc' => 'Pending', 'agent_id' => $agentId, 'source' => 'online', 'consent' => !empty($d['consent']), 'id_file' => $s['id_file'], 'created_by' => $u['id']]); }
@@ -66,7 +66,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && post('act') !== 'reveal') {
     redirect('/?p=submissions');
 }
 
-$agents = all("SELECT id,name,ref_code FROM users WHERE role='agent' ORDER BY name");
+$agents = all("SELECT id,name,ref_code FROM users WHERE role='agent' AND active=1 AND account_status='active' ORDER BY name");
 $link = rtrim($CONFIG['app_url'], '/') . '/register.php';
 
 if (get('id') !== '') {

@@ -72,6 +72,8 @@ function compliance_daily(?string $today = null): array {
     $n['sent'] = $r['sent']; $n['failed'] = $r['failed'];
     // saved registration drafts hold personal details: removed a day after they expire or are used
     q('DELETE FROM intake_drafts WHERE expires_at < DATE_SUB(NOW(), INTERVAL 1 DAY) OR used_at < DATE_SUB(NOW(), INTERVAL 1 DAY)');
+    // rate-limit records older than a week are no longer needed by any limit (longest window: 1 day)
+    q('DELETE FROM login_attempts WHERE at < DATE_SUB(NOW(), INTERVAL 7 DAY)');
     q('DELETE FROM upload_requests WHERE expires_at < DATE_SUB(NOW(), INTERVAL 90 DAY)');
     set_setting('compliance_last_run', $today . ' ' . date('H:i'));
     return $n;

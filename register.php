@@ -52,6 +52,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
             $tok = bin2hex(random_bytes(24));
             q('INSERT INTO intake_drafts (token_hash, data, phone_last4_hash, agent_id, ip, expires_at) VALUES (?,?,?,?,?,DATE_ADD(NOW(), INTERVAL 7 DAY))',
               [hash('sha256', $tok), enc(json_encode($keep, JSON_UNESCAPED_UNICODE)), $draftKey($tok, $last4), $agent['id'] ?? null, $ip]);
+            if ($agent && !empty($_SESSION['ref_link'])) q('UPDATE intake_drafts SET ref_link_id=? WHERE token_hash=?', [(int)$_SESSION['ref_link'], hash('sha256', $tok)]);
             if (!empty($_SESSION['draft_tok'])) q('UPDATE intake_drafts SET used_at=NOW() WHERE token_hash=?', [hash('sha256', $_SESSION['draft_tok'])]);
             $_SESSION['draft_tok'] = $tok;
             $draftLink = app_link('/register?draft=' . $tok);
@@ -69,7 +70,8 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
             $v = array_merge($v, $data);
             $benefs = [];
             foreach (($data['b_name'] ?? []) as $i => $bn) { if (trim((string)$bn) === '') continue; $row = []; foreach (BENEF_FIELDS as $k) $row[$k] = (string)($data['b_' . $k][$i] ?? ''); $benefs[] = $row; }
-            if ($d['agent_id'] && !$agent && ref_still_valid((int)$d['agent_id'], null)) { $_SESSION['ref_agent'] = (int)$d['agent_id']; $agent = one("SELECT id, username, name FROM users WHERE id=?", [$d['agent_id']]); }
+            // a saved form keeps its referral only if that exact short link is still active (switched off or regenerated: no credit)
+            if ($d['agent_id'] && !$agent && $d['ref_link_id'] && ref_still_valid((int)$d['agent_id'], (int)$d['ref_link_id'])) { $_SESSION['ref_agent'] = (int)$d['agent_id']; $_SESSION['ref_link'] = (int)$d['ref_link_id']; $agent = one("SELECT id, username, name FROM users WHERE id=?", [$d['agent_id']]); }
             $v['ref_label'] = $agent['username'] ?? '';
             $_SESSION['draft_tok'] = $tok;
             $view = 'form';

@@ -31,7 +31,15 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
     if ($nv['office'] === '') $errors[] = 'Choose the office.';
     $consent = post('consent') === '1';
     $agentId = $isAdmin ? ((int)post('agent_id') ?: null) : ($c ? $c['agent_id'] : (int)$u['id']);
-    if ($isAdmin && $agentId && !val("SELECT 1 FROM users WHERE id=? AND role='agent'", [$agentId])) $agentId = null;
+    if ($isAdmin && $agentId && (int)$agentId !== (int)($c['agent_id'] ?? 0) && !val("SELECT 1 FROM users WHERE id=? AND role='agent' AND active=1 AND account_status='active'", [$agentId])) $agentId = null; // new credit only to an active agent
+    if ($c && (int)($agentId ?? 0) !== (int)($c['agent_id'] ?? 0)) {
+        // who referred a client is a commission record: a referral proven by an agent link never moves, and other
+        // changes need an admin who controls sub-agents; every change is logged
+        require_once __DIR__ . '/../agents.php';
+        $proven = $c['agent_id'] && val('SELECT 1 FROM submissions WHERE client_id=? AND ref_verified=1 AND agent_id=?', [$c['id'], $c['agent_id']]);
+        if ($proven || agent_scope($u) !== 'all') { if ($proven || $agentId) $errors[] = $proven ? 'This client was referred through a sub-agent link, so the referral cannot be changed.' : 'Only an admin who manages sub-agents can change who referred a client.'; $agentId = $c['agent_id']; }
+        else audit('client_agent_changed', 'client', $c['id'], 'Referral sub-agent #' . (int)$c['agent_id'] . ' → #' . (int)$agentId);
+    }
     // KYC status and risk never change here: only the KYC review screen decides them
     $kyc = $c['kyc'] ?? 'Pending';
     $risk = $c['risk'] ?? 'Low';
