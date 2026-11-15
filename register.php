@@ -6,7 +6,8 @@ require __DIR__ . '/inc/otp.php';
 
 /*
  * Public client registration.
- * - Referral: only a signed sub-agent link (…/register?a=ID&s=… or the older ?ref=SA-1001&s=…) credits an agent.
+ * - Referral: only an active short link (/r/{name}) or a signed older link (…/register?a=ID&s=…, ?ref=SA-1001&s=…)
+ *   credits an agent, and only while the agent and the link are active (checked again when the form is sent).
  *   A code the client types is kept as "typed, not verified" and never credited automatically.
  * - Drafts: "Save and finish later" stores the answers encrypted; they come back only with the private link
  *   AND the last 4 digits of the phone number entered (5 wrong tries lock the draft).
@@ -19,9 +20,14 @@ $ip = client_ip();
 if (get('a') !== '' || get('ref') !== '') {
     $ag = agent_from_link(get('a'), mb_substr(get('ref'), 0, 30), get('s'));
     $_SESSION['ref_agent'] = $ag ? (int)$ag['id'] : null;
+    $_SESSION['ref_link'] = null;
     if (!$ag) $_SESSION['ref_hint'] = mb_substr(get('ref') ?: '', 0, 30);
 }
-$agent = !empty($_SESSION['ref_agent']) ? one("SELECT id, username, name FROM users WHERE id=? AND role='agent' AND active=1", [$_SESSION['ref_agent']]) : null;
+require_once __DIR__ . '/inc/agents.php';
+// a remembered referral counts only while the agent and the link are still active
+$agent = !empty($_SESSION['ref_agent']) && ref_still_valid((int)$_SESSION['ref_agent'], !empty($_SESSION['ref_link']) ? (int)$_SESSION['ref_link'] : null)
+    ? one("SELECT id, username, name FROM users WHERE id=?", [$_SESSION['ref_agent']]) : null;
+if (!$agent) unset($_SESSION['ref_agent'], $_SESSION['ref_link']);
 $v = ['ref_code' => $agent['username'] ?? ($_SESSION['ref_hint'] ?? ''), 'ref_label' => $agent ? $agent['username'] : ''];
 $benefs = [];
 $draftKey = fn(string $tok, string $last4) => hash_hmac('sha256', 'draft:' . $tok . ':' . $last4, sec_key('draft'));
@@ -63,7 +69,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
             $v = array_merge($v, $data);
             $benefs = [];
             foreach (($data['b_name'] ?? []) as $i => $bn) { if (trim((string)$bn) === '') continue; $row = []; foreach (BENEF_FIELDS as $k) $row[$k] = (string)($data['b_' . $k][$i] ?? ''); $benefs[] = $row; }
-            if ($d['agent_id'] && !$agent) { $_SESSION['ref_agent'] = (int)$d['agent_id']; $agent = one("SELECT id, username, name FROM users WHERE id=? AND role='agent' AND active=1", [$d['agent_id']]); }
+            if ($d['agent_id'] && !$agent && ref_still_valid((int)$d['agent_id'], null)) { $_SESSION['ref_agent'] = (int)$d['agent_id']; $agent = one("SELECT id, username, name FROM users WHERE id=?", [$d['agent_id']]); }
             $v['ref_label'] = $agent['username'] ?? '';
             $_SESSION['draft_tok'] = $tok;
             $view = 'form';
@@ -144,8 +150,8 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
             do { $ref = 'DXA-' . date('ymd') . '-' . strtoupper(substr(bin2hex(random_bytes(3)), 0, 5)); } while (val('SELECT 1 FROM submissions WHERE app_ref=?', [$ref]));
             $data = $v; $data['beneficiaries'] = $benefs;
             if (!$agent && $typed !== '' && ($sug = agent_by_code($typed))) $data['typed_code_matches_agent'] = (int)$sug['id']; // shown to staff, never credited automatically
-            q('INSERT INTO submissions (data,name,phone,ref_code,ref_verified,agent_id,id_file,ip,app_ref) VALUES (?,?,?,?,?,?,?,?,?)',
-                [enc(json_encode($data, JSON_UNESCAPED_UNICODE)), $v['name'], $v['phone'], $v['ref_code'] ?: null, $agent ? 1 : 0, $agent['id'] ?? null, $file, $ip, $ref]);
+            q('INSERT INTO submissions (data,name,phone,ref_code,ref_verified,agent_id,ref_link_id,id_file,ip,app_ref) VALUES (?,?,?,?,?,?,?,?,?,?)',
+                [enc(json_encode($data, JSON_UNESCAPED_UNICODE)), $v['name'], $v['phone'], $v['ref_code'] ?: null, $agent ? 1 : 0, $agent['id'] ?? null, $agent ? ($_SESSION['ref_link'] ?? null) : null, $file, $ip, $ref]);
             audit_write(null, 'public_registration', 'submission', (int)db()->lastInsertId(), $ref . ($v['ref_code'] ? ' · referral ' . $v['ref_code'] . ($agent ? ' (verified link, agent #' . $agent['id'] . ')' : ' (typed, not verified)') : ''), $ip);
             notify('New client registration ' . $ref, "A new client registration was submitted.\n\nReference: $ref\nOffice: {$v['office']}\n\nReview it in the portal: " . app_link('/?p=submissions'), 'new_registration');
             if (!empty($_SESSION['draft_tok'])) { q('UPDATE intake_drafts SET used_at=NOW() WHERE token_hash=?', [hash('sha256', $_SESSION['draft_tok'])]); unset($_SESSION['draft_tok']); }

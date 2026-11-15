@@ -17,7 +17,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
     if (!preg_match('/^[\p{L}\p{N}._@+-]{3,60}$/u', $username)) { q("INSERT INTO login_attempts (ip, username) VALUES (?, 'bad-id')", [client_ip()]); $username = 'bad-id'; }
     $password = $_POST['password'] ?? '';
     $ip = client_ip();
-    $win = "username NOT LIKE 'mfa:%' AND username NOT LIKE 'status-ref:%' AND username NOT LIKE 'returning%' AND username NOT IN ('status-check','install','addr-lookup','addr-retrieve') AND at > (NOW() - INTERVAL 15 MINUTE)";
+    $win = "username NOT LIKE 'mfa:%' AND username NOT LIKE 'status-ref:%' AND username NOT LIKE 'returning%' AND username NOT IN ('status-check','install','addr-lookup','addr-retrieve','ref-link') AND at > (NOW() - INTERVAL 15 MINUTE)";
     $ipFails = (int)val("SELECT COUNT(*) FROM login_attempts WHERE ip=? AND $win", [$ip]);
     $pairFails = (int)val("SELECT COUNT(*) FROM login_attempts WHERE ip=? AND username=? AND $win", [$ip, $username]);
     $userFails = (int)val("SELECT COUNT(*) FROM login_attempts WHERE username=? AND $win", [$username]);
@@ -34,7 +34,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
         $error = 'Too many wrong attempts. Wait 15 minutes and try again, or ask an admin to reset your password.';
     } else {
         $u = one('SELECT * FROM users WHERE username=?', [$username]);
-        if ($u && $u['active'] && is_string($password) && password_verify($password, $u['password_hash'])) {
+        if ($u && $u['active'] && ($u['account_status'] ?? 'active') === 'active' && is_string($password) && password_verify($password, $u['password_hash'])) {
             q('DELETE FROM login_attempts WHERE username=?', [$username]);
             if ($u['mfa_enabled']) {
                 // Password is right, but no session is given until the second step is done.
@@ -68,7 +68,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
         }
         q('INSERT INTO login_attempts (ip, username) VALUES (?,?)', [$ip, $username]);
         audit_write(isset($u['id']) ? (int)$u['id'] : null, 'login_failed', 'user', null, 'Login ID tried: ' . mb_substr($username, 0, 60), $ip);
-        $error = ($u && !$u['active']) ? 'This account is switched off. Contact a DhanXfer admin.' : 'Wrong ID or password.';
+        $error = ($u && (!$u['active'] || ($u['account_status'] ?? 'active') !== 'active') && is_string($password) && password_verify($password, $u['password_hash'])) ? 'This account is switched off. Contact a DhanXfer admin.' : 'Wrong ID or password.';
     }
 }
 

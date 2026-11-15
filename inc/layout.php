@@ -38,7 +38,7 @@ function page_head(string $title, bool $public = false): void {
     } else {
         $all = ($u['role'] === 'super_admin' ? ['insights' => ['Overview', '__super']] : []) + ['dashboard' => [$u['role'] === 'super_admin' ? "Today's operations" : 'Today', null], 'transfers' => ['Transfers', null], 'rates' => ['Rates', null], 'clients' => ['Clients', 'clients.all'],
             'submissions' => ['Online forms', 'submissions.review'], 'compliance' => ['Compliance', 'compliance.view'], 'commission' => ['Commission', 'commission.view'], 'log' => ['Daily log', 'log.use'],
-            'agents' => ['Team & sub-agents', ['team.agents', 'team.staff']], 'roles' => ['Roles', '__super'], 'audit' => ['Activity history', null], 'import' => ['Import', 'import']];
+            'subagents' => ['Sub-agents', ['team.agents', 'agents.assigned']], 'agents' => ['Team', ['team.agents', 'team.staff']], 'roles' => ['Roles', '__super'], 'audit' => ['Activity history', null], 'import' => ['Import', 'import']];
         $items = [];
         foreach ($all as $k => [$label, $perm]) {
             $ok = $perm === null || ($perm === '__super' ? $u['role'] === 'super_admin' : (is_array($perm) ? (can($perm[0]) || can($perm[1])) : can($perm)));
@@ -108,6 +108,8 @@ function share_block(string $link, string $refCode = '', string $title = 'Your c
       <div class="row">
         <button type="button" class="btn gold" data-share="<?= e($link) ?>" data-share-text="<?= e($msg) ?>">Share form</button>
         <a class="btn" href="https://wa.me/?text=<?= e(rawurlencode($msg)) ?>" target="_blank" rel="noopener">WhatsApp</a>
+        <a class="btn" href="sms:?&amp;body=<?= e(rawurlencode($msg)) ?>">SMS</a>
+        <a class="btn" href="mailto:?subject=<?= e(rawurlencode('Register with DhanXfer')) ?>&amp;body=<?= e(rawurlencode($msg)) ?>">Email</a>
         <button type="button" class="btn" data-copy="<?= e($link) ?>">Copy link</button>
       </div>
     </div>

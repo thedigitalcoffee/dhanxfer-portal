@@ -27,7 +27,7 @@ if ($u['role'] === 'agent') {
     <div class="spread"><div><h1>Welcome, <?= e($u['name']) ?></h1><div class="muted">Your referral code is <strong style="color:var(--gold2)"><?= e($u['username']) ?></strong></div></div>
       <div class="row"><a class="btn gold" href="/?p=client_form">+ New client</a></div></div>
     <?php rates_strip($liveRates); ?>
-    <?php share_block($link, $u['username']); ?>
+    <?php if ($link) share_block($link, $u['username']); else { ?><div class="banner warn">Your referral link is switched off. Contact the DhanXfer office for a new one.</div><?php } ?>
     <div class="tiles">
       <a class="tile" href="/?p=clients"><div class="k">My clients</div><div class="v num"><?= $nClients ?></div></a>
       <a class="tile <?= $nPending ? 'alert' : '' ?>" href="/?p=transfers&status=pending"><div class="k">Waiting for admin</div><div class="v num"><?= $nPending ?></div><div class="s">transfer requests</div></a>
@@ -46,6 +46,13 @@ if ($u['role'] === 'agent') {
         <?php if (!$subs): ?><div class="muted">None waiting.</div><?php endif; ?></div></div>
     </div>
     <?php page_foot(); return;
+}
+
+/* ---------------- roles without access to all clients (e.g. sub-agent managers) never see the operations board ---------------- */
+if (!can('clients.all')) {
+    require_once __DIR__ . '/../agents.php';
+    if (agent_scope($u)) redirect('/?p=subagents');
+    page_head('Home'); ?><h1>Welcome, <?= e($u['name']) ?></h1><p class="muted">Use the menu above.</p><?php page_foot(); return;
 }
 
 /* ---------------- super admin lands on the owner overview ---------------- */

@@ -5,9 +5,9 @@ require __DIR__ . '/inc/layout.php';
 
 $tok = get('t');
 $row = preg_match('/^[a-f0-9]{48}$/', $tok)
-    ? one('SELECT r.*, u.name, u.username, u.active FROM password_resets r JOIN users u ON u.id=r.user_id WHERE r.token_hash=?', [hash('sha256', $tok)])
+    ? one('SELECT r.*, u.name, u.username, u.active, u.account_status FROM password_resets r JOIN users u ON u.id=r.user_id WHERE r.token_hash=?', [hash('sha256', $tok)])
     : null;
-$valid = $row && !$row['used_at'] && strtotime($row['expires_at']) > time() && $row['active'];
+$valid = $row && !$row['used_at'] && strtotime($row['expires_at']) > time() && $row['active'] && in_array($row['account_status'], ['active', 'pending'], true);
 $err = [];
 
 if ($valid && $_SERVER['REQUEST_METHOD'] === 'POST') {
@@ -18,7 +18,7 @@ if ($valid && $_SERVER['REQUEST_METHOD'] === 'POST') {
     if (!$err) {
         $done = q('UPDATE password_resets SET used_at=NOW() WHERE id=? AND used_at IS NULL', [$row['id']])->rowCount();
         if ($done) {
-            q('UPDATE users SET password_hash=?, must_change_password=0, session_version=session_version+1 WHERE id=?', [password_hash($p1, PASSWORD_DEFAULT), $row['user_id']]);
+            q("UPDATE users SET password_hash=?, must_change_password=0, session_version=session_version+1, account_status=IF(account_status='pending','active',account_status) WHERE id=? AND active=1 AND account_status IN ('active','pending')", [password_hash($p1, PASSWORD_DEFAULT), $row['user_id']]);
             audit_write((int)$row['user_id'], $row['purpose'] === 'activate' ? 'account_activated' : 'reset_link_used', 'user', $row['user_id'], $row['purpose'] === 'activate' ? 'Account activated' : 'Password set with reset link', client_ip());
             $usr = one('SELECT * FROM users WHERE id=?', [$row['user_id']]);
             notify_user((int)$row['user_id'], $row['purpose'] === 'activate' ? 'Your DhanXfer portal account is active' : 'Security notice: your DhanXfer password was changed', "Hi {$row['name']},\n\n" . ($row['purpose'] === 'activate' ? 'Your DhanXfer portal account (' . $row['username'] . ') was activated just now.' : 'The password for your DhanXfer portal account (' . $row['username'] . ') was changed just now with a one-time link.') . "\n\nIf this was not you, contact DhanXfer right away.");

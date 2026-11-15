@@ -79,7 +79,7 @@ function db(): PDO {
     return $pdo;
 }
 
-const SCHEMA_VERSION = '9';
+const SCHEMA_VERSION = '10';
 /** True when the database is at the version this code expects. */
 function schema_current(): bool {
     try { return (string)db()->query("SELECT v FROM settings WHERE k='schema_version'")->fetchColumn() === SCHEMA_VERSION; } catch (Throwable $e) { return false; }
@@ -130,7 +130,13 @@ function migrate_locked(?string $ver): void {
         ['transfers', 'beneficiary_id', 'INT UNSIGNED NULL'],
         // v9: a reviewer decides the exact version they saw; approved details are never overwritten (a change makes a new row)
         ['beneficiaries', 'rev', 'INT UNSIGNED NOT NULL DEFAULT 0'], ['beneficiaries', 'replaced_by', 'INT UNSIGNED NULL'],
-        ['beneficiaries', 'updated_by', 'INT UNSIGNED NULL']);
+        ['beneficiaries', 'updated_by', 'INT UNSIGNED NULL'],
+        // v10: sub-agent control: account status with reason, manager scope, per-agent limits, link history
+        ['users', 'account_status', "VARCHAR(12) NOT NULL DEFAULT 'active'"], ['users', 'status_reason', 'VARCHAR(255) NULL'],
+        ['users', 'status_changed_at', 'DATETIME NULL'], ['users', 'status_changed_by', 'INT UNSIGNED NULL'],
+        ['users', 'manager_id', 'INT UNSIGNED NULL'], ['users', 'ref_epoch', 'INT NOT NULL DEFAULT 0'],
+        ['users', 'agent_can_clients', 'TINYINT(1) NOT NULL DEFAULT 1'], ['users', 'agent_can_transfers', 'TINYINT(1) NOT NULL DEFAULT 1'],
+        ['submissions', 'ref_link_id', 'INT UNSIGNED NULL']);
     foreach ($cols as [$t, $c, $def]) {
         if ($def === null) continue;
         $has = db()->prepare('SELECT 1 FROM information_schema.COLUMNS WHERE TABLE_SCHEMA=DATABASE() AND TABLE_NAME=? AND COLUMN_NAME=?');
@@ -138,7 +144,7 @@ function migrate_locked(?string $ver): void {
         if (!$has->fetchColumn()) db()->exec("ALTER TABLE `$t` ADD COLUMN `$c` $def");
     }
     // v9: indexes for duplicate checks and look-ups (not unique: older data may hold duplicates that a person must sort out)
-    foreach ([['beneficiaries', 'account_hash'], ['transfers', 'beneficiary_id'], ['clients', 'id_number_hash'], ['document_versions', 'number_hash']] as [$t, $c]) {
+    foreach ([['beneficiaries', 'account_hash'], ['transfers', 'beneficiary_id'], ['clients', 'id_number_hash'], ['document_versions', 'number_hash'], ['users', 'manager_id']] as [$t, $c]) {
         $ix = db()->prepare('SELECT 1 FROM information_schema.STATISTICS WHERE TABLE_SCHEMA=DATABASE() AND TABLE_NAME=? AND COLUMN_NAME=? LIMIT 1');
         $ix->execute([$t, $c]);
         if (!$ix->fetchColumn()) db()->exec("ALTER TABLE `$t` ADD INDEX `ix_$c` (`$c`)");
@@ -181,6 +187,7 @@ function migrate_locked(?string $ver): void {
         $ins = db()->prepare('INSERT IGNORE INTO role_permissions (role, perm) VALUES (?, ?)');
         foreach (['admin' => ['beneficiaries.manage'], 'staff' => ['beneficiaries.manage'], 'compliance' => ['beneficiaries.manage', 'beneficiaries.review']] as $role => $ps) foreach ($ps as $perm) $ins->execute([$role, $perm]);
     }
+    if (!(int)db()->query("SELECT COUNT(*) FROM role_permissions WHERE perm='agents.assigned'")->fetchColumn()) db()->exec("INSERT IGNORE INTO role_permissions (role, perm) VALUES ('manager','agents.assigned')");
     if (!(int)db()->query("SELECT COUNT(*) FROM role_permissions WHERE perm='compliance.view'")->fetchColumn()) {
         $ins = db()->prepare('INSERT IGNORE INTO role_permissions (role, perm) VALUES (?, ?)');
         foreach (['compliance' => ['compliance.view', 'compliance.manage'], 'admin' => ['compliance.view'], 'auditor' => ['compliance.view']] as $role => $ps) foreach ($ps as $perm) $ins->execute([$role, $perm]);
@@ -220,6 +227,9 @@ function migrate_locked(?string $ver): void {
         // v8: existing beneficiaries were never screened: they wait for review; duplicate-check keys added
         require_once __DIR__ . '/beneficiary.php';
         benef_migrate_v8();
+        // v10: switched-off accounts are "deactivated"; every sub-agent gets a short link named after their login ID
+        require_once __DIR__ . '/agents.php';
+        agents_migrate_v10();
         db()->prepare("REPLACE INTO settings (k, v) VALUES ('schema_version', ?)")->execute([SCHEMA_VERSION]);
         db()->commit();
     } catch (Throwable $e) { if (db()->inTransaction()) db()->rollBack(); throw $e; }
@@ -294,16 +304,16 @@ function me(): ?array {
     if (!$uid) return null;
     $key = $uid . ':' . (int)($_SESSION['sv'] ?? -1);
     if (!array_key_exists($key, $cache)) {
-        $u = one('SELECT * FROM users WHERE id=? AND active=1', [$uid]);
+        $u = one("SELECT * FROM users WHERE id=? AND active=1 AND account_status='active'", [$uid]);
         if (!$u || (int)$u['session_version'] !== (int)($_SESSION['sv'] ?? -1)) { $u = null; unset($_SESSION['uid'], $_SESSION['sv']); }
         $cache = [$key => $u];
     }
     return $cache[$key];
 }
 /* ---------- roles & permissions ---------- */
-const ROLES = ['super_admin' => 'Super admin', 'admin' => 'Admin / Operations manager', 'compliance' => 'Compliance officer', 'staff' => 'Operations staff', 'accountant' => 'Accountant', 'auditor' => 'Read-only auditor', 'agent' => 'Sub-agent'];
+const ROLES = ['super_admin' => 'Super admin', 'admin' => 'Admin / Operations manager', 'manager' => 'Sub-agent manager', 'compliance' => 'Compliance officer', 'staff' => 'Operations staff', 'accountant' => 'Accountant', 'auditor' => 'Read-only auditor', 'agent' => 'Sub-agent'];
 /** Roles that must use two-step login (authenticator app). */
-const MFA_REQUIRED = ['super_admin', 'admin', 'compliance'];
+const MFA_REQUIRED = ['super_admin', 'admin', 'compliance', 'manager'];
 const PERMS = [
     'clients.all' => 'See all clients and transfers',
     'clients.edit' => 'Add and edit clients',
@@ -317,7 +327,8 @@ const PERMS = [
     'rates.settings' => 'Change rate markups, pairs and Telegram bot',
     'commission.view' => 'See all sub-agent commission',
     'commission.set' => 'Set sub-agent commission rates',
-    'team.agents' => 'Add sub-agents and reset their passwords',
+    'team.agents' => 'Add sub-agents and reset their passwords; control every sub-agent and assign managers',
+    'agents.assigned' => 'Control only the sub-agents assigned to them (status, links, limits, reports)',
     'team.staff' => 'Add admins, staff and accountants',
     'log.use' => 'Use the daily work log',
     'export' => 'Export CSV files',
@@ -340,6 +351,7 @@ const DEFAULT_PERMS = [
     'auditor' => ['clients.all', 'commission.view', 'audit.all', 'export', 'compliance.view'],
     'staff' => ['clients.all', 'clients.edit', 'submissions.review', 'transfers.create', 'log.use', 'beneficiaries.manage'],
     'accountant' => ['clients.all', 'commission.view', 'export'],
+    'manager' => ['agents.assigned'],
 ];
 function role_label(string $r): string { return ROLES[$r] ?? ucfirst($r); }
 function role_perms(string $role): array {

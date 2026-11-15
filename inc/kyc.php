@@ -219,14 +219,29 @@ function agent_by_code(string $code): ?array {
     $id = val('SELECT agent_id FROM agent_codes WHERE code=?', [$code]);
     return $id ? one("SELECT * FROM users WHERE id=? AND role='agent'", [(int)$id]) : null;
 }
-function agent_sig(int $agentId): string { return substr(hash_hmac('sha256', 'agent:' . $agentId, sec_key('ref')), 0, 16); }
-function agent_link(array $agent): string { return app_link('/register?a=' . (int)$agent['id'] . '&s=' . agent_sig((int)$agent['id'])); }
+/** Signature of the older long link. Regenerating an agent's link raises ref_epoch, so every older long link stops. */
+function agent_sig(int $agentId, ?int $epoch = null): string {
+    $epoch ??= (int)val('SELECT ref_epoch FROM users WHERE id=?', [$agentId]);
+    return substr(hash_hmac('sha256', 'agent:' . $agentId . ($epoch ? ':' . $epoch : ''), sec_key('ref')), 0, 16);
+}
+/** The agent's link to share: the short /r/{name} link while it is active, otherwise null. */
+function agent_link(array $agent): ?string {
+    require_once __DIR__ . '/agents.php';
+    $l = ref_primary((int)$agent['id']);
+    return $l && $l['status'] === 'active' ? ref_short_url($l['slug']) : null;
+}
 /** Agent for a signed link: new form ?a=ID&s=… or the older ?ref=SA-1001&s=…; null when the signature is wrong. */
 function agent_from_link(string $a, string $ref, string $sig): ?array {
     if ($sig === '') return null;
-    if ($a !== '' && ctype_digit($a) && hash_equals(agent_sig((int)$a), $sig)) return one("SELECT * FROM users WHERE id=? AND role='agent' AND active=1", [(int)$a]);
-    if ($ref !== '' && ref_valid(strtoupper($ref), $sig)) return one("SELECT * FROM users WHERE ref_code=? AND role='agent' AND active=1", [strtoupper($ref)]);
-    return null;
+    require_once __DIR__ . '/agents.php';
+    $ag = null;
+    if ($a !== '' && ctype_digit($a) && hash_equals(agent_sig((int)$a), $sig)) $ag = one("SELECT * FROM users WHERE id=? AND role='agent'", [(int)$a]);
+    elseif ($ref !== '' && ref_valid(strtoupper($ref), $sig)) {
+        $ag = one("SELECT * FROM users WHERE ref_code=? AND role='agent'", [strtoupper($ref)]);
+        if ($ag && (int)$ag['ref_epoch'] > 0) $ag = null; // regenerated: the old SA-#### links stop too
+    }
+    // older long links follow the agent's status and main short link
+    return $ag && ref_still_valid((int)$ag['id'], null) ? $ag : null;
 }
 /** Changes a sub-agent's login ID (and so their referral code). Old code keeps pointing to the same agent. */
 function agent_rename(array $agent, string $new, int $by): void {

@@ -7,6 +7,8 @@ RewriteEngine On
 RewriteRule ^register/?$ register.php [L,QSA]
 RewriteRule ^status/?$ status.php [L,QSA]
 RewriteRule ^upload/?$ upload.php [L,QSA]
+# Short referral link: /r/{agent link name}
+RewriteRule ^r/([A-Za-z0-9._-]{1,40})/?$ r.php?s=$1 [L]
 # Block hidden files, the code folder and uploaded IDs from direct access
 RewriteRule (^|/)\.(?!well-known) - [F]
 RewriteRule ^(inc|storage|tests|vendor|tools)(/|$) - [F]

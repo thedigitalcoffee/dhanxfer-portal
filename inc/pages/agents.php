@@ -1,12 +1,13 @@
 <?php
 defined('DX') or exit;
 require_once __DIR__ . '/../rates.php';
+require_once __DIR__ . '/../agents.php';
 $secret = null; // a password to show once
 /** Roles the current user may create or manage. */
 function manageable_roles(): array {
     $r = [];
     if (can('team.agents')) $r[] = 'agent';
-    if (can('team.staff')) { $r[] = 'staff'; $r[] = 'accountant'; $r[] = 'auditor'; $r[] = 'compliance'; $r[] = 'admin'; }
+    if (can('team.staff')) { $r[] = 'staff'; $r[] = 'accountant'; $r[] = 'auditor'; $r[] = 'compliance'; $r[] = 'manager'; $r[] = 'admin'; }
     if (is_super()) $r[] = 'super_admin';
     return $r;
 }
@@ -30,6 +31,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
         if (!preg_match('/^[a-z0-9._-]{3,40}$/', $username)) $err[] = 'Login ID: 3–40 characters using letters, numbers, dot, dash or underscore.';
         elseif (val('SELECT 1 FROM users WHERE username=?', [$username])) $err[] = 'That login ID is already taken.';
         elseif ($role === 'agent' && val('SELECT 1 FROM agent_codes WHERE code=?', [$username])) $err[] = 'That name was used as a referral code by another sub-agent and stays reserved for them.';
+        elseif ($role === 'agent' && (val('SELECT 1 FROM referral_links WHERE slug=?', [$username]) || in_array($username, RESERVED_SLUGS, true))) $err[] = 'That name is reserved for referral links. Choose another login ID.';
         if ($ref !== null && !preg_match('/^[A-Z0-9-]{3,20}$/', $ref)) $err[] = 'Referral ID: 3–20 letters, numbers or dashes.';
         elseif ($ref !== null && val('SELECT 1 FROM users WHERE ref_code=?', [$ref])) $err[] = 'That referral ID is already used.';
         if ($err) { foreach ($err as $x) flash($x, 'bad'); redirect('/?p=agents'); }
@@ -37,7 +39,15 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
         q('INSERT INTO users (role,username,name,phone,email,office,ref_code,commission_note,password_hash,must_change_password,created_by,mfa_token_only) VALUES (?,?,?,?,?,?,?,?,?,0,?,' . (in_array($role, MFA_REQUIRED, true) ? 1 : 0) . ')',
             [$role, $username, $name, post('phone') ?: null, post('email') ?: null, in_array(post('office'), OFFICES, true) ? post('office') : null, $ref, mb_substr(post('commission_note'), 0, 250) ?: null, password_hash(bin2hex(random_bytes(32)), PASSWORD_DEFAULT), $u['id']]);
         $nid = (int)db()->lastInsertId();
-        if ($role === 'agent') { require_once __DIR__ . '/../kyc.php'; agent_code_register($nid, $username); }
+        if ($role === 'agent') {
+            require_once __DIR__ . '/../kyc.php';
+            agent_code_register($nid, $username);
+            // a new sub-agent waits for activation; their short link is made now and works once they are active
+            q("UPDATE users SET account_status='pending' WHERE id=?", [$nid]);
+            $na = one('SELECT * FROM users WHERE id=?', [$nid]);
+            ref_link_create($na, slug_suggest($na), (int)$u['id']);
+            agent_event($nid, 'created', null, (int)$u['id'], 'Pending activation');
+        }
         audit('create_user', 'user', $nid, "$role $username");
         $_SESSION['show_link'] = ['name' => $name, 'username' => $username, 'link' => make_reset_link($nid, (int)$u['id'], 'activate'), 'purpose' => 'activate', 'ref' => $ref, 'uid' => $nid];
         redirect('/?p=agents&id=' . $nid);
@@ -46,6 +56,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
     if (!$target) redirect('/?p=agents');
     $self = (int)$target['id'] === (int)$u['id'];
     if (!$self && !can_manage($target)) { flash('Your role cannot change this person.', 'bad'); redirect('/?p=agents'); }
+    if ($target['role'] === 'agent' && in_array($act, ['disable', 'enable'], true)) { flash('Use the Sub-agent Control Center to suspend, deactivate or reactivate a sub-agent (a reason is required).', 'bad'); redirect('/?p=subagents&id=' . $target['id']); }
     if ($self && !in_array($act, ['save'], true)) { flash('Change your own password under My account.', 'bad'); redirect('/?p=agents&id=' . $target['id']); }
     if ((int)$target['id'] === (int)$u['id'] && in_array($act, ['disable', 'role'], true)) { flash('You cannot switch off or change your own account.', 'bad'); redirect('/?p=agents&id=' . $target['id']); }
     // Never leave the business without a working super admin. Checks run one at a time (lock held until the
@@ -83,7 +94,15 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
         $_SESSION['show_link'] = ['name' => $target['name'], 'username' => $target['username'], 'link' => $link, 'purpose' => $target['last_login'] ? 'reset' : 'activate', 'ref' => $target['ref_code'], 'uid' => (int)$target['id']];
     } elseif ($act === 'rename' && $target['role'] === 'agent' && can('team.agents')) {
         require_once __DIR__ . '/../kyc.php';
-        try { agent_rename($target, post('new_username'), (int)$u['id']); flash('Login ID and referral code changed. Clients and links from before still count for this sub-agent.'); }
+        try {
+            agent_rename($target, post('new_username'), (int)$u['id']);
+            // the short link follows the new login ID when that name is free; the old link keeps working until disabled
+            $nu = one('SELECT * FROM users WHERE id=?', [$target['id']]);
+            $msg = '';
+            if (!slug_problem($nu['username'], (int)$nu['id'])) { ref_link_create($nu, $nu['username'], (int)$u['id']); agent_event((int)$nu['id'], 'link_added', null, (int)$u['id'], 'New main link /r/' . $nu['username'] . ' after rename'); }
+            else $msg = ' The short link name stays as it was (the new name is not available for links).';
+            flash('Login ID and referral code changed. Clients and links from before still count for this sub-agent.' . $msg);
+        }
         catch (RuntimeException $ex) { flash($ex->getMessage(), 'bad'); }
     } elseif ($act === 'email_link') {
         $ml = $_SESSION['mail_link'] ?? null; unset($_SESSION['mail_link']);
@@ -108,9 +127,9 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
         audit('change_role', 'user', $target['id'], $target['username'] . ': ' . $target['role'] . ' → ' . $nr);
         flash($target['name'] . ' is now ' . role_label($nr) . '.');
     } elseif ($act === 'disable') {
-        q('UPDATE users SET active=0, session_version=session_version+1 WHERE id=?', [$target['id']]); audit('disable_user', 'user', $target['id'], $target['username']); flash($target['name'] . ' can no longer log in.');
+        q("UPDATE users SET active=0, account_status='deactivated', session_version=session_version+1 WHERE id=?", [$target['id']]); audit('disable_user', 'user', $target['id'], $target['username']); flash($target['name'] . ' can no longer log in.');
     } elseif ($act === 'enable') {
-        q('UPDATE users SET active=1 WHERE id=?', [$target['id']]); audit('enable_user', 'user', $target['id'], $target['username']); flash($target['name'] . ' can log in again.');
+        q("UPDATE users SET active=1, account_status='active' WHERE id=?", [$target['id']]); audit('enable_user', 'user', $target['id'], $target['username']); flash($target['name'] . ' can log in again.');
     } elseif ($act === 'save') {
         q('UPDATE users SET name=?, phone=?, email=?, office=?, commission_note=? WHERE id=?', [mb_substr(post('name'), 0, 120) ?: $target['name'], post('phone') ?: null, post('email') ?: null, in_array(post('office'), OFFICES, true) ? post('office') : null, mb_substr(post('commission_note'), 0, 250) ?: null, $target['id']]);
         $newMail = (string)(post('email') ?: '');
@@ -157,7 +176,8 @@ if (get('id') !== '') {
           <a class="tile" href="/?p=transfers&agent=<?= (int)$a['id'] ?>"><div class="k">Accepted transfers</div><div class="v num"><?= (int)$stats['tx'] ?></div></a>
           <a class="tile <?= $stats['pend'] ? 'alert' : '' ?>" href="/?p=transfers&status=pending&agent=<?= (int)$a['id'] ?>"><div class="k">Waiting for you</div><div class="v num"><?= (int)$stats['pend'] ?></div></a>
         </div>
-        <?php share_block(agent_link($a), $a['username'], 'Personal client registration link'); ?>
+        <?php if ($l = agent_link($a)) share_block($l, $a['username'], 'Personal client registration link'); ?>
+        <p class="tag">Status, referral links, limits and manager: <a href="/?p=subagents&id=<?= (int)$a['id'] ?>">open in the Sub-agent Control Center</a>.</p>
         <?php if (can('team.agents')): $old = array_column(all('SELECT code FROM agent_codes WHERE agent_id=? AND is_current=0', [$a['id']]), 'code'); ?>
         <form method="post" class="card row" style="padding:12px"><?= csrf_field() ?><input type="hidden" name="act" value="rename"><input type="hidden" name="id" value="<?= (int)$a['id'] ?>">
           <div class="f" style="flex:1;min-width:200px"><label for="new_username">Login ID and referral code</label><input id="new_username" name="new_username" value="<?= e($a['username']) ?>" pattern="[a-z0-9._\-]{3,40}"></div>

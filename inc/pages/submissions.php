@@ -53,6 +53,8 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && post('act') !== 'reveal') {
         }
         $agentId = (int)post('agent_id') ?: null;
         if ($agentId && !val("SELECT 1 FROM users WHERE id=? AND role='agent'", [$agentId])) $agentId = null;
+        // a referral proven by an agent link is fixed: it cannot be moved to another agent or removed here
+        if ((int)$s['ref_verified'] === 1 && $s['agent_id']) $agentId = (int)$s['agent_id'];
         try { $cid = insert_client($v, ['kyc' => 'Pending', 'agent_id' => $agentId, 'source' => 'online', 'consent' => !empty($d['consent']), 'id_file' => $s['id_file'], 'created_by' => $u['id']]); }
         catch (IdNumberTaken $ex) { q("UPDATE submissions SET status='new', reviewed_by=NULL, reviewed_at=NULL WHERE id=?", [$s['id']]); flash($ex->getMessage(), 'bad'); redirect('/?p=submissions&id=' . $s['id']); }
         foreach (save_beneficiaries($cid, $d['beneficiaries'] ?? [], 'online', (int)$u['id']) as $be) flash('Beneficiary not added: ' . $be, 'warn');
@@ -95,8 +97,9 @@ if (get('id') !== '') {
       <?php if ($s['status'] === 'new'): ?>
         <form method="post" class="card"><?= csrf_field() ?><input type="hidden" name="id" value="<?= (int)$s['id'] ?>">
           <h3 style="margin-bottom:10px"><?= $s['client_id_returning'] ? 'Apply this update to client ' . e((string)val('SELECT client_no FROM clients WHERE id=?', [$s['client_id_returning']])) : 'Add as client' ?></h3>
+          <?php if ((int)$s['ref_verified'] === 1 && $s['agent_id']): ?><p class="tag">Referred through <?= e((string)val('SELECT name FROM users WHERE id=?', [$s['agent_id']])) ?>'s link<?= $s['ref_link_id'] ? ' (/r/' . e((string)val('SELECT slug FROM referral_links WHERE id=?', [$s['ref_link_id']])) . ')' : '' ?>. This credit is fixed.</p><?php else: ?>
           <div class="f" style="margin-bottom:12px"><label for="agent_id">Referral sub-agent</label><select id="agent_id" name="agent_id"><option value="">None (direct client)</option>
-            <?php foreach ($agents as $a): ?><option value="<?= (int)$a['id'] ?>"<?= (int)$s['agent_id'] === (int)$a['id'] ? ' selected' : '' ?>><?= e($a['name'] . ' · ' . $a['ref_code']) ?></option><?php endforeach; ?></select></div>
+            <?php foreach ($agents as $a): ?><option value="<?= (int)$a['id'] ?>"<?= (int)$s['agent_id'] === (int)$a['id'] ? ' selected' : '' ?>><?= e($a['name'] . ' · ' . $a['ref_code']) ?></option><?php endforeach; ?></select></div><?php endif; ?>
           <button class="btn gold" name="act" value="approve"><?= $s['client_id_returning'] ? 'Apply update' : 'Add as client' ?></button>
           <p class="tag" style="margin-bottom:0">You can edit any detail on the client page afterwards.</p></form>
         <form method="post" class="card"><?= csrf_field() ?><input type="hidden" name="id" value="<?= (int)$s['id'] ?>">

@@ -13,7 +13,7 @@ $pages = [
     'client_form' => ['clients.edit'], 'transfer_form' => ['transfers.create'],
     'commission' => ['commission.view'], 'submissions' => ['submissions.review'],
     'agents' => ['team.agents', 'team.staff'], 'log' => ['log.use'], 'import' => ['import'], 'roles' => ['__super'], 'insights' => ['__super'], 'mfa' => null,
-    'kyc_review' => ['kyc.decide'], 'compliance' => ['compliance.view'], 'beneficiary' => null,
+    'kyc_review' => ['kyc.decide'], 'compliance' => ['compliance.view'], 'beneficiary' => null, 'subagents' => ['team.agents', 'agents.assigned'],
 ];
 $p = get('p', 'dashboard');
 if (!array_key_exists($p, $pages)) $p = 'dashboard';
@@ -24,5 +24,9 @@ if ($need !== null) {
     $isAgentPage = $u['role'] === 'agent' && in_array($p, ['client_form', 'transfer_form', 'commission'], true);
     if ($need === ['__super']) { if ($u['role'] !== 'super_admin') { flash('Only the super admin can change roles.', 'bad'); redirect('/'); } }
     elseif (!$isAgentPage) require_perm(...$need);
+}
+// per-agent limits set in the Sub-agent Control Center, checked on every request to those pages
+if ($u['role'] === 'agent' && (($p === 'client_form' && !(int)$u['agent_can_clients']) || ($p === 'transfer_form' && !(int)$u['agent_can_transfers']))) {
+    flash('This action is switched off for your account. Contact the DhanXfer office.', 'bad'); redirect('/');
 }
 require __DIR__ . '/inc/pages/' . $p . '.php';

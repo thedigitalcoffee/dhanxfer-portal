@@ -69,7 +69,10 @@ q('SET SESSION wait_timeout=900, interactive_timeout=900');
 function e2e_cleanup(): void {
     q("DELETE FROM submissions WHERE phone IN ('+1 416 555 7009','+1 416 555 7010')");
     q("DELETE FROM transfers WHERE ref_no='E2E-T2'"); q("DELETE FROM clients WHERE name IN ('E2E Client One','E2E Client Two')");
-    q("DELETE FROM users WHERE username IN ('e2e.legacy','e2e.staffx','e2e.v2owner')"); q('DELETE FROM login_attempts');
+    $sa14 = array_column(all("SELECT id FROM users WHERE username IN ('e2e.agentx','e2e.manager')"), 'id');
+    if ($sa14) { $in14 = implode(',', array_map('intval', $sa14)); q("DELETE FROM referral_links WHERE agent_id IN ($in14)"); q("DELETE FROM agent_events WHERE agent_id IN ($in14)"); q("DELETE FROM password_resets WHERE user_id IN ($in14)"); q("DELETE FROM submissions WHERE agent_id IN ($in14)"); q("DELETE FROM agent_codes WHERE agent_id IN ($in14)"); }
+    q("DELETE FROM users WHERE username IN ('e2e.legacy','e2e.staffx','e2e.v2owner','e2e.agentx','e2e.manager')"); q('DELETE FROM login_attempts');
+    q("UPDATE users SET manager_id=NULL, account_status='active', active=1, agent_can_clients=1, agent_can_transfers=1 WHERE username IN ('test.agent1','test.agent2')");
     $ids = array_column(all("SELECT id FROM clients WHERE name LIKE 'E2E %'"), 'id');
     if ($ids) { $in = implode(',', array_map('intval', $ids));
         foreach (['document_versions', 'client_documents', 'kyc_reviews', 'rekyc_cases', 'reminders', 'upload_requests', 'beneficiaries', 'beneficiary_events', 'client_otps'] as $t) q("DELETE FROM $t WHERE client_id IN ($in)");
@@ -111,7 +114,7 @@ foreach (['agents', 'submissions', 'insights', 'roles', 'import', 'log'] as $pg)
 $ag->req('/file.php?f=20261114_' . str_repeat('a', 24) . '.jpg', null, false); ok($ag->code === 403, 'sub-agent cannot open ID documents', (string)$ag->code);
 $ag->req('/?p=audit'); ok(!str_contains($ag->body, 'test.agent2') && !str_contains($ag->body, 'Test Agent Two'), "sub-agent activity page shows only their own actions");
 $ag->req('/'); ok(str_contains($ag->body, 'class="bottombar"') && str_contains($ag->body, 'width=device-width'), 'sub-agent gets the mobile app layout (bottom bar, mobile viewport)');
-ok(preg_match('/register\?a=\d+&amp;s=[a-f0-9]{16}/', $ag->body) === 1, 'sub-agent share link is signed');
+ok(preg_match('#/r/test\.agent1"#', $ag->body) === 1 && !str_contains($ag->body, 'register?a=') && str_contains($ag->body, 'wa.me/') && str_contains($ag->body, 'sms:') && str_contains($ag->body, 'data-copy='), 'sub-agent shares a short /r/ link with Share, WhatsApp, SMS and Copy buttons');
 
 // ---- 3. admin login needs two-step; no session from password alone ----
 fresh_step_wait();
@@ -507,6 +510,85 @@ ok(str_contains($up13->body, 'Enter your code') && !str_contains($up13->body, 'U
 q('UPDATE client_otps SET code_hash=? WHERE client_id=? AND purpose=? AND used_at IS NULL', [otp_hash($vc13, 'upload', '975310'), $vc13, 'upload']);
 $up13->req('/upload', ['csrf' => $up13->csrf(), 'act' => 'otp', 't' => $um13[1] ?? '', 'code' => '975310']);
 ok(str_contains($up13->body, 'Upload your current ID'), 'right code opens the upload form');
+// ---- 14. Sub-agent Control Center and short referral links /r/{username} ----
+require_once __DIR__ . '/../inc/agents.php';
+q("UPDATE submissions SET created_at = created_at - INTERVAL 2 HOUR WHERE name LIKE 'E2E %'"); // keep the per-connection form limit for this section
+$adm14 = new Browser(); fresh_step_wait(); $adm14->login('test.admin');
+$adm14->post('/?p=agents', ['act' => 'create', 'role' => 'agent', 'name' => 'E2E Agent X', 'username' => 'e2e.agentx', 'phone' => '+1 416 555 7090', 'office' => 'Canada']);
+$ax = one("SELECT * FROM users WHERE username='e2e.agentx'");
+ok($ax && $ax['account_status'] === 'pending' && val("SELECT slug FROM referral_links WHERE agent_id=? AND is_primary=1", [$ax['id']]) === 'e2e.agentx', 'new sub-agent starts as pending activation with the link /r/e2e.agentx');
+$vp = new Browser(); $vp->req('/r/e2e.agentx', null, false);
+ok(in_array($vp->code, [302, 303], true) && str_ends_with($vp->loc, '/register') && !str_contains($vp->loc, '?'), 'a pending agent link opens the plain form (no credit, no token in the address)');
+$adm14->post('/?p=agents', ['act' => 'create', 'role' => 'agent', 'name' => 'E2E Admin Name', 'username' => 'admin']);
+ok(!val("SELECT 1 FROM users WHERE username='admin'"), 'a reserved name cannot become a sub-agent login or link');
+// activation (password chosen through the one-time link) makes the account and link active
+$axPw = 'E2E-Agent-X-' . bin2hex(random_bytes(4));
+$tok = bin2hex(random_bytes(16)); q('INSERT INTO password_resets (user_id, token_hash, expires_at, purpose) VALUES (?,?,DATE_ADD(NOW(), INTERVAL 1 HOUR),?)', [$ax['id'], hash('sha256', $tok), 'activate']);
+$act14 = new Browser(); $act14->req('/reset.php?t=' . $tok); $act14->req('/reset.php?t=' . $tok, ['csrf' => $act14->csrf(), 'password' => $axPw, 'password2' => $axPw]);
+ok(val('SELECT account_status FROM users WHERE id=?', [$ax['id']]) === 'active', 'activation link sets the password and makes the sub-agent active');
+$T['e2e.agentx'] = ['password' => $axPw];
+// a visitor follows the short link (any letter case): clean redirect to the form, credit remembered on the server only
+$v1 = new Browser(); $v1->req('/r/E2E.AgentX', null, false);
+$loc1 = $v1->loc; $v1->req('/register');
+ok(str_ends_with($loc1, '/register') && str_contains($v1->body, 'e2e.agentx') && str_contains($v1->body, 'width=device-width'), 'short link (any letter case) redirects to the mobile registration form with the referral shown');
+$v1->req('/register', ['csrf' => $v1->csrf(), 'name' => 'E2E Short Link Person', 'country' => 'Canada', 'phone' => '416 555 7091', 'consent' => '1', 'ref_code' => 'test.agent2']);
+$s14 = one("SELECT * FROM submissions WHERE name='E2E Short Link Person' ORDER BY id DESC");
+ok($s14 && (int)$s14['agent_id'] === (int)$ax['id'] && (int)$s14['ref_verified'] === 1 && (int)$s14['ref_link_id'] === (int)val("SELECT id FROM referral_links WHERE slug='e2e.agentx'"), 'the form is credited to the agent by internal id and link id; a typed code cannot change it');
+// staff cannot move a link-proven referral to another agent at approval
+$st14 = new Browser(); $st14->login('test.staff');
+$st14->post('/?p=submissions', ['id' => $s14['id'], 'act' => 'approve', 'agent_id' => (string)$a2['id']]);
+ok((int)val('SELECT agent_id FROM clients WHERE id=?', [(int)val('SELECT client_id FROM submissions WHERE id=?', [$s14['id']])]) === (int)$ax['id'], 'at approval a link-proven referral stays with its agent (posted agent ignored)');
+// the agent sees their short link with share buttons
+$agx = new Browser(); $agx->login('e2e.agentx');
+ok(str_contains($agx->body, '/r/e2e.agentx') && str_contains($agx->body, 'wa.me/') && str_contains($agx->body, 'data-share='), "agent's home shows /r/e2e.agentx with Share, WhatsApp and Copy");
+// manager with two-step login, assigned to agent X only
+$mSec = mfa_new_secret(); $mPw = 'E2E-Manager-' . bin2hex(random_bytes(4));
+q("INSERT INTO users (role, username, name, password_hash, must_change_password, mfa_secret, mfa_enabled, mfa_token_only) VALUES ('manager','e2e.manager','E2E Manager',?,0,?,1,0)", [password_hash($mPw, PASSWORD_DEFAULT), enc($mSec)]);
+$mid = (int)db()->lastInsertId(); $T['e2e.manager'] = ['password' => $mPw, 'mfa_secret' => $mSec];
+$adm14->post('/?p=subagents', ['id' => $ax['id'], 'act' => 'assign', 'manager_id' => (string)$mid, 'reason' => '']);
+ok(!(int)val('SELECT manager_id FROM users WHERE id=?', [$ax['id']]), 'assigning a manager needs a reason');
+$adm14->post('/?p=subagents', ['id' => $ax['id'], 'act' => 'assign', 'manager_id' => (string)$mid, 'reason' => 'E2E Toronto team']);
+ok((int)val('SELECT manager_id FROM users WHERE id=?', [$ax['id']]) === $mid, 'admin assigns the sub-agent to the manager');
+$mg = new Browser(); fresh_step_wait(); $mg->login('e2e.manager'); $mg->req('/');
+ok(str_contains($mg->body, 'Sub-agent Control Center') && str_contains($mg->body, 'E2E Agent X') && !str_contains($mg->body, 'test.agent1'), 'manager lands on the Control Center and sees only their own sub-agent');
+$mg->req('/?p=subagents&id=' . $a1['id']); ok(!str_contains($mg->body, 'Portal access'), "manager cannot open another team's sub-agent");
+foreach (['clients' => 'E2E Client One', 'agents' => 'Add a person', 'roles' => 'Job roles', 'submissions' => 'E2E Short Link', 'compliance' => 'Compliance Center'] as $pg => $needle) { $mg->req("/?p=$pg"); ok(!str_contains($mg->body, $needle), "manager cannot see $pg"); }
+$mg->post('/?p=subagents', ['id' => $a1['id'], 'act' => 'suspend', 'reason' => 'Trying another team']);
+ok(val('SELECT account_status FROM users WHERE id=?', [$a1['id']]) === 'active', "manager cannot suspend another team's sub-agent");
+$mg->post('/?p=subagents', ['id' => $a1['id'], 'act' => 'assign', 'manager_id' => (string)$mid, 'reason' => 'Taking this agent']);
+$mg->post('/?p=subagents', ['id' => (int)val("SELECT id FROM users WHERE username='test.admin'"), 'act' => 'suspend', 'reason' => 'Escalation attempt']);
+ok(!(int)val('SELECT manager_id FROM users WHERE id=?', [$a1['id']]) && val("SELECT account_status FROM users WHERE username='test.admin'") === 'active', 'manager cannot take over agents or touch admin accounts (no escalation)');
+$mg->post('/?p=agents', ['id' => $mid, 'act' => 'role', 'role' => 'admin']); $mg->post('/?p=roles', ['role' => 'manager', 'perm' => ['team.agents']]);
+ok(val('SELECT role FROM users WHERE id=?', [$mid]) === 'manager' && !role_can('manager', 'team.agents'), 'manager cannot raise their own role or permissions');
+// a visitor opened the link before the suspension and sends the form after it: no credit
+$v2 = new Browser(); $v2->req('/r/e2e.agentx'); $v2->req('/register');
+$mg->post('/?p=subagents', ['id' => $ax['id'], 'act' => 'suspend', 'reason' => 'E2E complaint under review']);
+$agx->req('/?p=clients', null, false);
+ok(val('SELECT account_status FROM users WHERE id=?', [$ax['id']]) === 'suspended' && in_array($agx->code, [302, 303], true) && str_contains($agx->loc, 'login'), "suspension ends the agent's open session at once");
+$v2->req('/register', ['csrf' => $v2->csrf(), 'name' => 'E2E After Suspend', 'country' => 'Canada', 'phone' => '416 555 7092', 'consent' => '1']);
+ok(($as = one("SELECT * FROM submissions WHERE name='E2E After Suspend' ORDER BY id DESC")) && !$as['agent_id'] && !(int)$as['ref_verified'], 'a form sent after the suspension is not credited, even if the link was opened before');
+$v3 = new Browser(); $v3->req('/r/e2e.agentx'); $v3->req('/register'); ok(!str_contains($v3->body, 'e2e.agentx'), 'the short link of a suspended agent credits nobody');
+$agx2 = new Browser(); $agx2->login('e2e.agentx'); ok(str_contains($agx2->body, 'switched off') && !str_contains($agx2->body, 'Welcome,'), 'a suspended agent cannot log in');
+ok((int)val("SELECT agent_id FROM clients WHERE id=?", [(int)val('SELECT client_id FROM submissions WHERE id=?', [$s14['id']])]) === (int)$ax['id'], 'the client referred before the suspension stays credited to the agent');
+// reactivate, switch off one link, regenerate
+$mg->post('/?p=subagents', ['id' => $ax['id'], 'act' => 'reactivate', 'reason' => 'E2E review closed']);
+$lnk = (int)val("SELECT id FROM referral_links WHERE slug='e2e.agentx'");
+$mg->post('/?p=subagents', ['id' => $ax['id'], 'act' => 'link_disable', 'link' => (string)$lnk, 'reason' => 'E2E link posted publicly']);
+$v4 = new Browser(); $v4->req('/r/e2e.agentx'); $v4->req('/register');
+ok(val('SELECT account_status FROM users WHERE id=?', [$ax['id']]) === 'active' && val('SELECT status FROM referral_links WHERE id=?', [$lnk]) === 'disabled' && !str_contains($v4->body, 'e2e.agentx'), 'manager reactivates; a switched-off link credits nobody while the account stays active');
+$mg->post('/?p=subagents', ['id' => $ax['id'], 'act' => 'link_regenerate', 'slug' => 'e2e.agentx2', 'reason' => 'E2E new link after misuse']);
+$v5 = new Browser(); $v5->req('/r/e2e.agentx2'); $v5->req('/register');
+ok(str_contains($v5->body, 'e2e.agentx') && val("SELECT status FROM referral_links WHERE id=?", [$lnk]) === 'retired', 'regenerated link /r/e2e.agentx2 works; the old one is retired');
+$adm14->post('/?p=subagents', ['id' => $ax['id'], 'act' => 'link_enable', 'link' => (string)$lnk, 'reason' => 'E2E try to revive retired link']);
+ok(val("SELECT status FROM referral_links WHERE id=?", [$lnk]) === 'retired', 'a retired link cannot be switched back on');
+// limits are enforced on the server
+$mg->post('/?p=subagents', ['id' => $ax['id'], 'act' => 'limits', 'can_transfers' => '1', 'reason' => 'E2E no new clients for now']);
+$agx3 = new Browser(); $agx3->login('e2e.agentx'); $agx3->req('/?p=client_form');
+ok(!str_contains($agx3->body, 'name="name"') && (int)val('SELECT agent_can_clients FROM users WHERE id=?', [$ax['id']]) === 0, 'an agent whose client rights are switched off cannot open or post the client form');
+$evs14 = array_column(all('SELECT action FROM agent_events WHERE agent_id=? ORDER BY id', [$ax['id']]), 'action');
+ok(implode(',', $evs14) === 'created,assigned,suspended,reactivated,link_disabled,link_regenerated,limits' && (int)val("SELECT COUNT(*) FROM agent_events WHERE agent_id=? AND (reason IS NULL OR reason='') AND action<>'created'", [$ax['id']]) === 0, 'every restriction is in the control history with its reason');
+$mg->req('/?p=subagents&id=' . $ax['id']); snap('subagents', $mg->body);
+
 // ---- 10. phone-size layout snapshots (synthetic staging data) ----
 $m1 = new Browser(); $m1->login('test.agent1');
 foreach (['agent_home' => '/', 'agent_clients' => '/?p=clients', 'agent_new_client' => '/?p=client_form', 'agent_rates' => '/?p=rates', 'agent_transfers' => '/?p=transfers', 'agent_commission' => '/?p=commission', 'agent_transfer_new' => '/?p=transfer_form'] as $k => $pth) { $m1->req($pth); snap($k, $m1->body); }
@@ -521,7 +603,7 @@ foreach ($SNAP as $k => $h) {
 }
 @file_put_contents(data_dir() . '/snapshots.txt', $bundle);
 $lite = '';
-foreach (['beneficiary', 'otp', 'register_new'] as $k) {
+foreach (['beneficiary', 'otp', 'register_new', 'subagents'] as $k) {
     if (!isset($SNAP[$k])) continue;
     $h = preg_replace('/name="csrf" value="[a-f0-9]+"/', 'name="csrf" value="x"', $SNAP[$k]);
     $h = preg_replace('#<head>.*?</head>#s', '<!--HEAD-->', $h);

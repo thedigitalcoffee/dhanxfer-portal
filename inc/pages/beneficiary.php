@@ -4,7 +4,7 @@ defined('DX') or exit;
 $c = one('SELECT * FROM clients WHERE id=?', [(int)get('client')]);
 if (!$c || !can_see_client($c)) { flash('Client not found.', 'bad'); redirect('/?p=clients'); }
 $isAgent = $u['role'] === 'agent';
-$canManage = $isAgent || can('beneficiaries.manage');
+$canManage = ($isAgent && (int)$u['agent_can_clients']) || can('beneficiaries.manage');
 $canReview = can('beneficiaries.review');
 $b = get('id') !== '' ? one('SELECT * FROM beneficiaries WHERE id=? AND client_id=?', [(int)get('id'), $c['id']]) : null;
 if (get('id') !== '' && !$b) { flash('Beneficiary not found.', 'bad'); redirect('/?p=client&id=' . $c['id']); }

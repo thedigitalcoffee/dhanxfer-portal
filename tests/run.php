@@ -28,7 +28,9 @@ function ok(bool $cond, string $name) { global $pass, $fail, $out; $cond ? $pass
 function as_user(?array $u) { $_SESSION['uid'] = $u['id'] ?? 0; $_SESSION['sv'] = $u['session_version'] ?? 0; }
 function mkuser(string $role, string $name, ?string $ref = null): array {
     q('INSERT INTO users (role, username, name, ref_code, password_hash, must_change_password) VALUES (?,?,?,?,?,0)', [$role, strtolower(str_replace(' ', '.', $name)) . bin2hex(random_bytes(2)), $name, $ref, password_hash('x', PASSWORD_DEFAULT)]);
-    return one('SELECT * FROM users WHERE id=?', [(int)db()->lastInsertId()]);
+    $nu = one('SELECT * FROM users WHERE id=?', [(int)db()->lastInsertId()]);
+    if ($role === 'agent') { require_once __DIR__ . '/../inc/agents.php'; ref_link_create($nu, slug_suggest($nu), null); }
+    return $nu;
 }
 
 // Safety: never touch a database that could be live. The test database must differ from the live config
@@ -407,7 +409,7 @@ $thrown = false; try { agent_code_register((int)$agB['id'], 'renamed.agent'); } 
 ok($thrown, 'a current code cannot be registered to a second agent');
 $ag2 = one('SELECT * FROM users WHERE id=?', [$agA['id']]);
 ok(agent_from_link((string)$agA['id'], '', agent_sig((int)$agA['id']))['id'] == $agA['id'] && agent_from_link((string)$agB['id'], '', agent_sig((int)$agA['id'])) === null, 'signed links use the internal ID and cannot be re-pointed to another agent');
-ok(str_contains(agent_link($ag2), 'a=' . $agA['id']) && agent_from_link('', 'SA-1001', ref_sig('SA-1001')) !== null, 'old SA-#### signed links keep working');
+ok(str_contains(agent_link($ag2), '/r/') && agent_from_link('', 'SA-1001', ref_sig('SA-1001')) !== null, 'the shared link is the short /r/ link; old SA-#### signed links keep working');
 
 
 // ---- 18. beneficiaries ----
@@ -526,6 +528,67 @@ $taken = false; $nc = (int)val('SELECT COUNT(*) FROM clients'); try { insert_cli
 ok($taken && (int)val('SELECT COUNT(*) FROM clients') === $nc, 'a new client with an ID number already on file is refused before any record is made');
 $own = doc_add_version($cB, ['doc_type' => 'Passport', 'number' => 'X9988776', 'expires_on' => date('Y-m-d', strtotime('+3 years'))], 'admin', null);
 ok($own > 0, 'the owner of the ID number can still add a new version of it');
+
+// ---- 22. sub-agent control center and short referral links ----
+require_once __DIR__ . '/../inc/agents.php';
+ok((int)val("SELECT COUNT(*) FROM users u WHERE role='agent' AND NOT EXISTS (SELECT 1 FROM referral_links l WHERE l.agent_id=u.id AND l.is_primary=1)") === 0, 'every sub-agent has a main short link');
+$mgr = mkuser('manager', 'Mgr One'); $mgr2 = mkuser('manager', 'Mgr Two');
+$sx = mkuser('agent', 'Short X'); $sy = mkuser('agent', 'Short Y');
+$re = fn($id) => one('SELECT * FROM users WHERE id=?', [$id]);
+agent_assign_manager($sx, (int)$mgr['id'], 'Toronto team assignment', $admin);
+$sx = $re($sx['id']);
+ok(can_control_agent($sx, $mgr) && !can_control_agent($sy, $mgr) && !can_control_agent($sx, $mgr2), 'a manager controls only the sub-agents assigned to them');
+ok(!can_control_agent($admin, $mgr) && !can_control_agent($super, $mgr) && !can_control_agent($mgr2, $mgr) && !can_control_agent($mgr, $mgr), 'a manager cannot control admin, super admin, other managers or themselves');
+ok(agent_scope($comp) === null && agent_scope($staff) === null && !can_control_agent($sx, $comp), 'roles without the permission cannot control sub-agents');
+$thr = ''; try { agent_assign_manager($sy, (int)$mgr['id'], 'I want this agent too', $mgr); } catch (RuntimeException $ex) { $thr = $ex->getMessage(); }
+ok($thr !== '' && (int)$re($sy['id'])['manager_id'] === 0, 'a manager cannot assign sub-agents to themselves (no scope escalation)');
+ok(!role_can('manager', 'team.agents') && !role_can('manager', 'team.staff') && !role_can('manager', 'clients.all') && in_array('manager', MFA_REQUIRED, true), 'managers have no team, staff or all-client rights by default and need two-step login');
+$slugX = ref_primary((int)$sx['id'])['slug'];
+ok(ref_resolve(strtoupper($slugX))['id'] == $sx['id'] && str_ends_with(ref_short_url($slugX), '/r/' . $slugX), 'short link /r/name finds the agent (any letter case) and is a clean URL');
+ok(slug_problem('admin', (int)$sx['id']) !== null && slug_problem('dhanxfer-help', (int)$sx['id']) !== null && slug_problem('login', (int)$sx['id']) !== null && slug_problem('a', (int)$sx['id']) !== null && slug_problem('bad name', (int)$sx['id']) !== null, 'reserved names, system words and bad formats cannot be link names');
+ok(slug_problem($slugX, (int)$sy['id']) !== null && slug_problem($sy['username'], (int)$sx['id']) !== null, 'a link name or login ID of another agent cannot be taken');
+$thr = ''; try { agent_set_status($sx, 'suspended', '', $mgr); } catch (RuntimeException $ex) { $thr = $ex->getMessage(); }
+ok(str_contains($thr, 'reason') && $re($sx['id'])['account_status'] === 'active', 'a reason is required to restrict an account');
+// suspension: sessions end, links stop, activation links cancelled
+q("INSERT INTO password_resets (user_id, token_hash, expires_at, created_by) VALUES (?, ?, DATE_ADD(NOW(), INTERVAL 1 DAY), ?)", [$sx['id'], hash('sha256', 'tok-sx'), $admin['id']]);
+$svBefore = (int)$sx['session_version'];
+q("INSERT INTO submissions (data, name, phone, agent_id, ref_verified, ref_link_id) VALUES ('x','Kept Referral','+1',?,1,?)", [$sx['id'], ref_primary((int)$sx['id'])['id']]);
+q("INSERT INTO transfers (ref_no, client_name, agent_id, send_amount, status, transfer_date, commission, commission_currency) VALUES ('TX-SX-1','Kept',?,100,'completed',?,25,'INR')", [$sx['id'], today()]);
+agent_set_status($sx, 'suspended', 'Under review for complaints', $mgr);
+$sxs = $re($sx['id']);
+ok($sxs['account_status'] === 'suspended' && !(int)$sxs['active'] && (int)$sxs['session_version'] === $svBefore + 1, 'suspend: account off and every session version invalidated (logged out everywhere)');
+ok(!val('SELECT 1 FROM password_resets WHERE user_id=? AND used_at IS NULL', [$sx['id']]), 'suspend: unused activation and reset links are cancelled');
+ok(ref_resolve($slugX) === null && !ref_still_valid((int)$sx['id'], (int)ref_primary((int)$sx['id'])['id']) && agent_from_link((string)$sx['id'], '', agent_sig((int)$sx['id'])) === null, 'suspend: short link and older signed links stop crediting at once');
+ok((int)val("SELECT agent_id FROM submissions WHERE name='Kept Referral'") === (int)$sx['id'] && (float)val("SELECT commission FROM transfers WHERE ref_no='TX-SX-1'") == 25.0 && (int)val("SELECT agent_id FROM transfers WHERE ref_no='TX-SX-1'") === (int)$sx['id'], 'existing referrals and commissions keep their original agent');
+ok((int)val("SELECT COUNT(*) FROM agent_events WHERE agent_id=? AND action='suspended' AND reason='Under review for complaints' AND user_id=?", [$sx['id'], $mgr['id']]) === 1 && (int)val("SELECT COUNT(*) FROM audit WHERE action='agent_suspended' AND entity_id=?", [$sx['id']]) === 1, 'the restriction, reason and person are in the history and the tamper-evident log');
+agent_set_status($sxs, 'deactivated', 'Contract ended in November', $mgr);
+$thr = ''; try { agent_set_status($re($sx['id']), 'active', 'Manager wants them back', $mgr); } catch (RuntimeException $ex) { $thr = $ex->getMessage(); }
+ok(str_contains($thr, 'Only an admin') && $re($sx['id'])['account_status'] === 'deactivated', 'a manager cannot bring back a deactivated sub-agent');
+agent_set_status($re($sx['id']), 'active', 'New contract signed', $admin);
+ok($re($sx['id'])['account_status'] === 'pending' && ref_resolve($slugX) === null, 'an admin can bring them back; someone who never logged in returns to pending activation, link still off until active');
+q("UPDATE users SET account_status='active', active=1, last_login=NOW() WHERE id=?", [$sx['id']]); $sx = $re($sx['id']);
+ok(ref_resolve($slugX)['id'] == $sx['id'], 'once active again the link credits new referrals');
+// one link off / on, regenerate
+$lx = ref_primary((int)$sx['id']);
+ref_link_set($sx, $lx, 'disabled', 'Posted on a public spam forum', $mgr);
+ok(ref_resolve($slugX) === null && $re($sx['id'])['account_status'] === 'active', 'switching off one link stops it without touching the account');
+ref_link_set($sx, ref_primary((int)$sx['id']), 'active', 'Spam post removed', $mgr);
+ok(ref_resolve($slugX)['id'] == $sx['id'], 'the link can be switched back on');
+$oldSig = agent_sig((int)$sx['id']);
+$newL = ref_link_regenerate($sx, 'shortx.new', 'Link was copied by a stranger', $mgr);
+ok(ref_resolve($slugX) === null && ref_resolve('shortx.new')['id'] == $sx['id'] && val('SELECT status FROM referral_links WHERE slug=?', [$slugX]) === 'retired', 'regenerate: new link works, every older link is retired');
+ok(agent_from_link((string)$sx['id'], '', $oldSig) === null && agent_from_link((string)$sx['id'], '', agent_sig((int)$sx['id'])) !== null, 'regenerate also stops older long signed links');
+$thr = ''; try { ref_link_set($sx, one('SELECT * FROM referral_links WHERE slug=?', [$slugX]), 'active', 'Bring the old one back', $admin); } catch (RuntimeException $ex) { $thr = $ex->getMessage(); }
+ok($thr !== '' && slug_problem($slugX, (int)$sy['id']) !== null, 'a retired link stays retired and its name is never given to another agent');
+ok((int)val("SELECT agent_id FROM submissions WHERE name='Kept Referral'") === (int)$sx['id'] && (int)val("SELECT ref_link_id FROM submissions WHERE name='Kept Referral'") === (int)$lx['id'], 'referral history keeps the original agent and link after links change');
+// attribution cannot be pointed at another agent
+ok(!ref_still_valid((int)$sy['id'], (int)$newL) && ref_still_valid((int)$sx['id'], (int)$newL), "one agent's link cannot credit another agent");
+$thr = ''; try { ref_link_set($sy, one('SELECT * FROM referral_links WHERE id=?', [$newL]), 'disabled', 'Wrong agent link trick', $admin); } catch (RuntimeException $ex) { $thr = $ex->getMessage(); }
+ok($thr !== '', "a link can only be changed through its own agent");
+$thr = ''; try { ref_link_set($sy, ref_primary((int)$sy['id']), 'disabled', 'Not my team', $mgr); } catch (RuntimeException $ex) { $thr = $ex->getMessage(); }
+ok($thr !== '' && ref_primary((int)$sy['id'])['status'] === 'active', "a manager cannot switch off another team's link");
+agent_set_limits($sx, false, true, 'No new clients until training', $mgr);
+ok(!(int)$re($sx['id'])['agent_can_clients'] && (int)$re($sx['id'])['agent_can_transfers'], 'per-agent limits are saved (checked on every request to those pages)');
 
 // ---- 21. key ring: envelope encryption, rotation, Cloud KMS adapter (mocked: no cloud service is called) ----
 require_once __DIR__ . '/../inc/reseal.php';
