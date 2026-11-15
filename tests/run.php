@@ -737,6 +737,10 @@ ok(!in_array('approved', wd_allowed($wr($w8), $mgrR), true), 'splitting a large 
 q("UPDATE withdrawal_events SET reason='edited later' WHERE withdrawal_id=? AND to_status='approved'", [$w1]);
 ok(wd_verify($w1) !== null, 'editing the history outside the portal is detected');
 
+// ---- 24. email through an authenticated mailbox ----
+require_once __DIR__ . '/../inc/smtp.php';
+ok(smtp_message('no-reply@dhanxfer.com', 'x@example.com', 'S', 'From: A', "Code 123\n.\nend") === "To: <x@example.com>\r\nSubject: S\r\nFrom: A\r\n\r\nCode 123\r\n..\r\nend\r\n.\r\n", 'SMTP messages use CRLF and escape lines that start with a dot (a message cannot end early)');
+
 // ---- 21. key ring: envelope encryption, rotation, Cloud KMS adapter (mocked: no cloud service is called) ----
 require_once __DIR__ . '/../inc/reseal.php';
 require_once __DIR__ . '/../inc/backup.php';

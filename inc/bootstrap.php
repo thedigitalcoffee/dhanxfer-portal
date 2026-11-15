@@ -699,7 +699,13 @@ function send_mail(string $to, string $subject, string $body, string $kind = 'no
         'Content-Transfer-Encoding: 8bit',
         'Auto-Submitted: auto-generated',
     ]);
-    $ok = @mail($to, '=?UTF-8?B?' . base64_encode($subject) . '?=', $body . "\n\n--\nDhanXfer Portal · WhatsApp +1 (942)-6600-0600 · www.dhanxfer.com\nThis is an automatic message.", $headers, '-f' . $from);
+    $text = $body . "\n\n--\nDhanXfer Portal · WhatsApp +1 (942)-6600-0600 · www.dhanxfer.com\nThis is an automatic message.";
+    $subj = '=?UTF-8?B?' . base64_encode($subject) . '?=';
+    if (!empty($CONFIG['smtp']['host']) && !empty($CONFIG['smtp']['pass'])) {
+        // authenticated mailbox: signed and accepted as genuine (PHP mail() from the web server lands in Junk)
+        require_once __DIR__ . '/smtp.php';
+        $ok = smtp_send($CONFIG['smtp'], $from, $to, $subj, $headers, $text);
+    } else $ok = @mail($to, $subj, $text, $headers, '-f' . $from);
     try { audit_write(null, $ok ? 'email_sent' : 'email_failed', 'email', null, $kind, 'mail'); } catch (Throwable $e) {}
     return $ok;
 }

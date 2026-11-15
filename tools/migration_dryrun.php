@@ -89,6 +89,30 @@ foreach ($pdo->query("SELECT id_file FROM clients WHERE id_file IS NOT NULL AND 
 $onDisk = count(glob($idDir . '/*') ?: []);
 $p("ID documents: $withFile linked, $present found, $missing missing; $onDisk file(s) in the folder");
 if ($missing) $warn[] = "$missing linked ID document(s) are missing on disk";
+// v8–v12: beneficiaries, sub-agents, links, transfers and commission (counts only)
+if (in_array('beneficiaries', $tables, true)) {
+    $nb = $counts['beneficiaries'];
+    $dupAcc = $orph("SELECT COUNT(*) FROM (SELECT client_id, UPPER(REPLACE(REPLACE(account,' ',''),'-','')) a FROM beneficiaries WHERE account IS NOT NULL AND account<>'' AND account NOT LIKE 'enc:%' GROUP BY client_id, a HAVING COUNT(*)>1) x");
+    $p("Beneficiaries: $nb, all start as 'waiting for review' after the upgrade (review backlog before transfers can be accepted); same account twice for one client: $dupAcc group(s)");
+    if ($nb) $warn[] = "$nb beneficiary(ies) must be reviewed before their next transfer";
+}
+if (in_array('users', $tables, true)) {
+    require_once __DIR__ . '/../inc/agents.php';
+    $ag = $pdo->query("SELECT id, username, active FROM users WHERE role='agent'")->fetchAll();
+    $reserved = 0; $odd = 0;
+    foreach ($ag as $a) { $u = mb_strtolower((string)$a['username']); if (in_array($u, RESERVED_SLUGS, true)) $reserved++; elseif (!preg_match('/^[a-z0-9](?:[a-z0-9._-]{1,28}[a-z0-9])$/', $u)) $odd++; }
+    $off = count(array_filter($ag, fn($a) => !(int)$a['active']));
+    $p('Sub-agents: ' . count($ag) . " ($off switched off → 'deactivated'); short link /r/{login ID} for each, except $reserved reserved and $odd unusual login ID(s) that get a numbered link name");
+}
+if (in_array('transfers', $tables, true)) {
+    $bySt = $pdo->query('SELECT status, COUNT(*) n FROM transfers GROUP BY status')->fetchAll();
+    $p('Transfers by status: ' . implode(', ', array_map(fn($r) => "{$r['status']} {$r['n']}", $bySt)));
+    $open = $orph("SELECT COUNT(*) FROM transfers WHERE status IN ('pending','accepted')");
+    $p("Open transfers (pending/accepted) without a linked beneficiary after the upgrade: $open (staff link an approved beneficiary when accepting or paying out)");
+    $hasCom = (bool)$col('transfers', 'commission');
+    $legacy = $hasCom ? $orph("SELECT COUNT(*) FROM transfers WHERE agent_id IS NOT NULL AND commission IS NOT NULL") : 0;
+    $p("Older transfers with a commission: $legacy. They keep their commission exactly as recorded and are NOT credited to the new CAD wallet (settled outside the panel); no commission is recalculated.");
+}
 $pdo->rollBack();
 $verdict = $stop ? 'NOT SAFE: ' . implode('; ', $stop) : ($warn ? 'SAFE with notes: ' . implode('; ', $warn) : 'SAFE: every record can be upgraded and encrypted');
 $txt = date('c') . "  READ-ONLY upgrade rehearsal (counts only, nothing written)\n" . implode("\n", $out) . "\n$verdict\n";
