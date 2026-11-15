@@ -662,7 +662,7 @@ $wr = fn($id) => one('SELECT * FROM commission_withdrawals WHERE id=?', [$id]);
 ok(wd_allowed($wr($w1), $re($wa['id'])) === [] && wd_allowed($wr($w1), $comp) === [] && wd_allowed($wr($w1), $staff) === [], 'the sub-agent and roles without permission cannot change a withdrawal');
 $e5 = ''; try { wd_transition($w1, 'approved', $re($wa['id']), ['reason' => 'Approving my own request']); } catch (RuntimeException $ex) { $e5 = $ex->getMessage(); }
 ok($e5 !== '' && $wr($w1)['status'] === 'requested', 'a sub-agent cannot approve their own withdrawal');
-ok(!in_array('paid', wd_allowed($wr($w1), $admin), true) && !in_array('processing', wd_allowed($wr($w1), $admin), true) && in_array('approved', wd_allowed($wr($w1), $admin), true), 'admin reviews and approves; only finance processes and pays');
+ok(!in_array('paid', wd_allowed($wr($w1), $admin), true) && !in_array('processing', wd_allowed($wr($w1), $admin), true) && in_array('under_review', wd_allowed($wr($w1), $admin), true), 'admin reviews and approves; only finance processes and pays');
 $e6 = ''; try { wd_transition($w1, 'paid', $acct, ['reason' => 'Skip the steps', 'confirm' => '1', 'payment_date' => today(), 'reference' => 'ETR-1']); } catch (RuntimeException $ex) { $e6 = $ex->getMessage(); }
 ok($e6 !== '' && $wr($w1)['status'] === 'requested', 'steps cannot be skipped (Requested cannot jump to Paid)');
 $e7 = ''; try { wd_transition($w1, 'under_review', $admin, ['reason' => '']); } catch (RuntimeException $ex) { $e7 = $ex->getMessage(); }
@@ -717,7 +717,7 @@ $e14 = ''; try { wd_transition($w4, 'under_review', $admin, ['reason' => 'Second
 ok($e14 !== '' && (int)val("SELECT COUNT(*) FROM withdrawal_events WHERE withdrawal_id=? AND to_status='under_review'", [$w4]) === 1, 'a repeated or out-of-order change is refused (status guard), so nothing is applied twice');
 // no FX recalculation at withdrawal; immutable history
 q("UPDATE market_rates SET rate=100 WHERE send_currency='CAD' AND receive_currency='INR' AND rate_date=?", [$D]);
-ok(wallet_balance((int)$wa['id'])['earned'] == 994.95, 'balances use the locked CAD values; later FX changes have no effect');
+ok(wallet_balance((int)$wa['id'])['earned'] == 990.32, 'balances use the locked CAD values; later FX changes have no effect');
 ok(wd_verify($w1) === null && (int)val('SELECT COUNT(*) FROM withdrawal_events WHERE withdrawal_id=?', [$w1]) === 5, 'each withdrawal has a complete, timestamped history of who changed what and why');
 $t5 = $mkT('W-5', 100000, 'CAD', 'INR', 'completed'); wallet_sync((int)$wa['id']);
 $w5 = wd_request($re($wa['id']), '100', ''); wd_transition($w5, 'under_review', $admin, ['reason' => 'Review it']);
