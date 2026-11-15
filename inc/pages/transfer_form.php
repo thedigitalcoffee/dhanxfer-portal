@@ -40,7 +40,11 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
             $u['id'], $status !== 'pending' ? $u['id'] : null, $status !== 'pending' ? date('Y-m-d H:i:s') : null]);
         $tid = (int)db()->lastInsertId();
         q('UPDATE transfers SET beneficiary_id=? WHERE id=?', [$bsel['id'], $tid]);
+        // commission and its CAD value are locked now, at the order-day rate, and never recalculated
+        require_once __DIR__ . '/../wallet.php';
+        commission_lock($tid);
         apply_commission($tid);
+        if ($status === 'completed') wallet_sync((int)$c['agent_id']);
         audit('create_transfer', 'transfer', $tid, $ref . ' ' . $status);
         if (!$canDecide) notify('Transfer request ' . $ref . ' from ' . $u['name'], "{$u['name']} ({$u['ref_code']}) requested a transfer of " . money($amt, $v['send_currency']) . ".\n\nAccept or reject it in the portal: " . app_link("/?p=transfers&id=$tid"), 'transfer_request');
         flash($canDecide ? "Transfer $ref saved." : "Transfer request $ref sent. An admin will accept or reject it.");

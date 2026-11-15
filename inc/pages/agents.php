@@ -84,6 +84,13 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
             foreach ($ids as $r) apply_commission((int)$r['id']);
             flash('Commission rates saved and applied to ' . count($ids) . ' earlier transfer(s) that had none.');
         } else flash('Commission rates saved. New accepted transfers use them.');
+    } elseif ($act === 'approval_limit' && !$self && role_can($target['role'], 'withdrawals.team') && (can('team.staff') || is_super())) {
+        // how much a manager may approve on one withdrawal of their team (empty = cannot approve, only review)
+        $raw = trim(post('approval_limit')); $lim = $raw === '' ? null : (is_numeric($raw) && (float)$raw >= 0 && (float)$raw <= 100000 ? round((float)$raw, 2) : false);
+        if ($lim === false || trim(post('reason')) === '') { flash('Enter a limit between 0 and 100,000 CAD (or empty) and a reason.', 'bad'); redirect('/?p=agents&id=' . $target['id']); }
+        q('UPDATE users SET approval_limit_cad=? WHERE id=?', [$lim, $target['id']]);
+        audit('approval_limit_set', 'user', $target['id'], $target['username'] . ': ' . ($lim === null ? 'none' : 'CAD ' . $lim) . ' · ' . mb_substr(post('reason'), 0, 200));
+        flash('Approval limit saved.');
     } elseif ($act === 'reset_link') {
         try { $link = make_reset_link((int)$target['id'], (int)$u['id'], $target['last_login'] ? 'reset' : 'activate'); }
         catch (RuntimeException $ex) { flash($ex->getMessage(), 'bad'); redirect('/?p=agents&id=' . $target['id']); }
@@ -226,6 +233,12 @@ if (get('id') !== '') {
           <?php if (is_super() && $a['mfa_enabled']): ?><button class="btn" name="act" value="mfa_reset" data-confirm="Turn off two-step login for <?= e($a['name']) ?> so they can set it up again (for a lost phone)?">Reset two-step login</button><?php endif; ?><?= $a['active'] ? '<button class="btn danger" name="act" value="disable" data-confirm="Switch off this account? They will be logged out.">Switch off login</button>' : '<button class="btn ok" name="act" value="enable">Switch login back on</button>' ?></div>
           <?php else: ?><p class="tag">This is you. Change your password under <a href="/?p=account">My account</a>.</p><?php endif; ?>
         </form>
+        <?php if (!$isAgent && (int)$a['id'] !== (int)$u['id'] && role_can($a['role'], 'withdrawals.team') && (can('team.staff') || is_super())): ?>
+        <form method="post" class="card"><?= csrf_field() ?><input type="hidden" name="id" value="<?= (int)$a['id'] ?>"><input type="hidden" name="act" value="approval_limit">
+          <h3 style="margin-bottom:10px">Withdrawal approval limit</h3>
+          <div class="row"><input name="approval_limit" inputmode="decimal" value="<?= e($a['approval_limit_cad']) ?>" placeholder="CAD, empty = review only" style="width:170px"><input name="reason" required placeholder="Reason" style="flex:1;min-width:150px"><button class="btn">Save</button></div>
+          <p class="tag" style="margin-bottom:0">Largest single withdrawal of their own team this person may approve. Marking Paid always needs finance.</p></form>
+        <?php endif; ?>
         <?php $roleOpts = array_values(array_filter(manageable_roles(), fn($x) => $x !== 'agent')); if (!$isAgent && (int)$a['id'] !== (int)$u['id'] && $roleOpts): ?>
         <form method="post" class="card"><?= csrf_field() ?><input type="hidden" name="id" value="<?= (int)$a['id'] ?>"><input type="hidden" name="act" value="role">
           <h3 style="margin-bottom:10px">Job role</h3>

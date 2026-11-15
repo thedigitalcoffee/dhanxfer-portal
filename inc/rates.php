@@ -196,7 +196,7 @@ function commission_rate_for(?int $agentId, ?string $send, ?string $recv): ?floa
 /** Works out and stores the commission on an accepted/completed transfer; clears it otherwise. */
 function apply_commission(int $transferId): void {
     $t = one('SELECT * FROM transfers WHERE id=?', [$transferId]);
-    if (!$t) return;
+    if (!$t || $t['commission_locked_at']) return; // locked at order submission (with its CAD value): never changed
     if (!in_array($t['status'], ['accepted', 'completed'], true) || !$t['agent_id']) {
         q('UPDATE transfers SET commission=NULL, commission_per_unit=NULL, commission_currency=NULL WHERE id=?', [$transferId]);
         return;

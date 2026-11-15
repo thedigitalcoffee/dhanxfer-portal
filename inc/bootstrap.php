@@ -79,7 +79,7 @@ function db(): PDO {
     return $pdo;
 }
 
-const SCHEMA_VERSION = '10';
+const SCHEMA_VERSION = '11';
 /** True when the database is at the version this code expects. */
 function schema_current(): bool {
     try { return (string)db()->query("SELECT v FROM settings WHERE k='schema_version'")->fetchColumn() === SCHEMA_VERSION; } catch (Throwable $e) { return false; }
@@ -136,7 +136,11 @@ function migrate_locked(?string $ver): void {
         ['users', 'status_changed_at', 'DATETIME NULL'], ['users', 'status_changed_by', 'INT UNSIGNED NULL'],
         ['users', 'manager_id', 'INT UNSIGNED NULL'], ['users', 'ref_epoch', 'INT NOT NULL DEFAULT 0'],
         ['users', 'agent_can_clients', 'TINYINT(1) NOT NULL DEFAULT 1'], ['users', 'agent_can_transfers', 'TINYINT(1) NOT NULL DEFAULT 1'],
-        ['submissions', 'ref_link_id', 'INT UNSIGNED NULL'], ['intake_drafts', 'ref_link_id', 'INT UNSIGNED NULL']);
+        ['submissions', 'ref_link_id', 'INT UNSIGNED NULL'], ['intake_drafts', 'ref_link_id', 'INT UNSIGNED NULL'],
+        // v11: commission locked in CAD at the order-day rate; manager approval limit for withdrawals
+        ['transfers', 'commission_fx_rate', 'DECIMAL(16,6) NULL'], ['transfers', 'commission_fx_date', 'DATE NULL'],
+        ['transfers', 'commission_fx_source', 'VARCHAR(60) NULL'], ['transfers', 'commission_cad', 'DECIMAL(14,2) NULL'],
+        ['transfers', 'commission_locked_at', 'DATETIME NULL'], ['users', 'approval_limit_cad', 'DECIMAL(14,2) NULL']);
     foreach ($cols as [$t, $c, $def]) {
         if ($def === null) continue;
         $has = db()->prepare('SELECT 1 FROM information_schema.COLUMNS WHERE TABLE_SCHEMA=DATABASE() AND TABLE_NAME=? AND COLUMN_NAME=?');
@@ -188,6 +192,8 @@ function migrate_locked(?string $ver): void {
         foreach (['admin' => ['beneficiaries.manage'], 'staff' => ['beneficiaries.manage'], 'compliance' => ['beneficiaries.manage', 'beneficiaries.review']] as $role => $ps) foreach ($ps as $perm) $ins->execute([$role, $perm]);
     }
     if (!(int)db()->query("SELECT COUNT(*) FROM role_permissions WHERE perm='agents.assigned'")->fetchColumn()) db()->exec("INSERT IGNORE INTO role_permissions (role, perm) VALUES ('manager','agents.assigned')");
+    if (!(int)db()->query("SELECT COUNT(*) FROM role_permissions WHERE perm IN ('withdrawals.review','withdrawals.team','withdrawals.pay')")->fetchColumn())
+        db()->exec("INSERT IGNORE INTO role_permissions (role, perm) VALUES ('admin','withdrawals.review'),('manager','withdrawals.team'),('accountant','withdrawals.pay')");
     if (!(int)db()->query("SELECT COUNT(*) FROM role_permissions WHERE perm='compliance.view'")->fetchColumn()) {
         $ins = db()->prepare('INSERT IGNORE INTO role_permissions (role, perm) VALUES (?, ?)');
         foreach (['compliance' => ['compliance.view', 'compliance.manage'], 'admin' => ['compliance.view'], 'auditor' => ['compliance.view']] as $role => $ps) foreach ($ps as $perm) $ins->execute([$role, $perm]);
@@ -329,6 +335,9 @@ const PERMS = [
     'commission.set' => 'Set sub-agent commission rates',
     'team.agents' => 'Add sub-agents and reset their passwords; control every sub-agent and assign managers',
     'agents.assigned' => 'Control only the sub-agents assigned to them (status, links, limits, reports)',
+    'withdrawals.review' => 'Review, approve, reject or cancel commission withdrawals of any sub-agent',
+    'withdrawals.team' => 'Review commission withdrawals of their own team, approve up to their approval limit',
+    'withdrawals.pay' => 'Finance: process withdrawals, mark them Paid or Failed, reconcile failed payments',
     'team.staff' => 'Add admins, staff and accountants',
     'log.use' => 'Use the daily work log',
     'export' => 'Export CSV files',
@@ -346,12 +355,12 @@ const COMPLIANCE_DEFAULTS = [
     'rekyc_open_days' => '90', 'benef_high_risk_countries' => '', 'benef_max_per_client' => '10', 'benef_four_eyes' => '1', 'escalate_after_days' => '7', 'upload_link_days' => '7', 'reminder_max_attempts' => '3',
 ];
 const DEFAULT_PERMS = [
-    'admin' => ['clients.all', 'clients.edit', 'submissions.review', 'transfers.create', 'transfers.decide', 'rates.set', 'commission.view', 'team.agents', 'log.use', 'export', 'audit.all', 'compliance.view', 'beneficiaries.manage'],
+    'admin' => ['clients.all', 'clients.edit', 'submissions.review', 'transfers.create', 'transfers.decide', 'rates.set', 'commission.view', 'team.agents', 'log.use', 'export', 'audit.all', 'compliance.view', 'beneficiaries.manage', 'withdrawals.review'],
     'compliance' => ['clients.all', 'kyc.decide', 'pii.reveal', 'submissions.review', 'audit.all', 'export', 'compliance.view', 'compliance.manage', 'beneficiaries.manage', 'beneficiaries.review'],
     'auditor' => ['clients.all', 'commission.view', 'audit.all', 'export', 'compliance.view'],
     'staff' => ['clients.all', 'clients.edit', 'submissions.review', 'transfers.create', 'log.use', 'beneficiaries.manage'],
-    'accountant' => ['clients.all', 'commission.view', 'export'],
-    'manager' => ['agents.assigned'],
+    'accountant' => ['clients.all', 'commission.view', 'export', 'withdrawals.pay'],
+    'manager' => ['agents.assigned', 'withdrawals.team'],
 ];
 function role_label(string $r): string { return ROLES[$r] ?? ucfirst($r); }
 function role_perms(string $role): array {

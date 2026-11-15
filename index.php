@@ -13,7 +13,7 @@ $pages = [
     'client_form' => ['clients.edit'], 'transfer_form' => ['transfers.create'],
     'commission' => ['commission.view'], 'submissions' => ['submissions.review'],
     'agents' => ['team.agents', 'team.staff'], 'log' => ['log.use'], 'import' => ['import'], 'roles' => ['__super'], 'insights' => ['__super'], 'mfa' => null,
-    'kyc_review' => ['kyc.decide'], 'compliance' => ['compliance.view'], 'beneficiary' => null, 'subagents' => ['team.agents', 'agents.assigned'],
+    'kyc_review' => ['kyc.decide'], 'compliance' => ['compliance.view'], 'beneficiary' => null, 'subagents' => ['team.agents', 'agents.assigned'], 'withdrawals' => ['withdrawals.review', 'withdrawals.team', 'withdrawals.pay'],
 ];
 $p = get('p', 'dashboard');
 if (!array_key_exists($p, $pages)) $p = 'dashboard';

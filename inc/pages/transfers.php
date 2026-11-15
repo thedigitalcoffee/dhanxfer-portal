@@ -44,6 +44,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
         q("UPDATE transfers SET status='cancelled' WHERE id=?", [$t['id']]); $ok = 'Transfer request cancelled.';
     }
     if ($ok) apply_commission((int)$t['id']);
+    if ($ok && $act === 'complete' && $t['agent_id']) { require_once __DIR__ . '/../wallet.php'; commission_lock((int)$t['id']); wallet_sync((int)$t['agent_id']); }
     if ($ok) { audit('transfer_' . $act, 'transfer', $t['id'], $t['ref_no'] . ($note ? ' · ' . $note : '')); flash($ok); }
     else flash('That action is not allowed for this transfer.', 'bad');
     $back = $_SERVER['HTTP_REFERER'] ?? '';

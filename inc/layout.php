@@ -38,15 +38,16 @@ function page_head(string $title, bool $public = false): void {
     } else {
         $all = ($u['role'] === 'super_admin' ? ['insights' => ['Overview', '__super']] : []) + ['dashboard' => [$u['role'] === 'super_admin' ? "Today's operations" : 'Today', null], 'transfers' => ['Transfers', null], 'rates' => ['Rates', null], 'clients' => ['Clients', 'clients.all'],
             'submissions' => ['Online forms', 'submissions.review'], 'compliance' => ['Compliance', 'compliance.view'], 'commission' => ['Commission', 'commission.view'], 'log' => ['Daily log', 'log.use'],
-            'subagents' => ['Sub-agents', ['team.agents', 'agents.assigned']], 'agents' => ['Team', ['team.agents', 'team.staff']], 'roles' => ['Roles', '__super'], 'audit' => ['Activity history', null], 'import' => ['Import', 'import']];
+            'subagents' => ['Sub-agents', ['team.agents', 'agents.assigned']], 'withdrawals' => ['Withdrawals', '__wd'], 'agents' => ['Team', ['team.agents', 'team.staff']], 'roles' => ['Roles', '__super'], 'audit' => ['Activity history', null], 'import' => ['Import', 'import']];
         $items = [];
         foreach ($all as $k => [$label, $perm]) {
-            $ok = $perm === null || ($perm === '__super' ? $u['role'] === 'super_admin' : (is_array($perm) ? (can($perm[0]) || can($perm[1])) : can($perm)));
+            $ok = $perm === null || ($perm === '__wd' ? (can('withdrawals.review') || can('withdrawals.team') || can('withdrawals.pay')) : ($perm === '__super' ? $u['role'] === 'super_admin' : (is_array($perm) ? (can($perm[0]) || can($perm[1])) : can($perm))));
             if ($ok) $items[$k] = $label;
         }
     }
     $badges = [];
     if (can('transfers.decide')) $badges['transfers'] = (int)val("SELECT COUNT(*) FROM transfers WHERE status='pending'");
+    if (can('withdrawals.review') || can('withdrawals.pay')) $badges['withdrawals'] = (int)val("SELECT COUNT(*) FROM commission_withdrawals WHERE status IN ('requested','under_review','approved','processing','failed')");
     if (can('submissions.review')) $badges['submissions'] = (int)val("SELECT COUNT(*) FROM submissions WHERE status='new'");
     if (can('compliance.view')) $badges['compliance'] = (int)val("SELECT COUNT(*) FROM clients WHERE kyc IN ('Pending','Info requested','Escalated')") + (int)val("SELECT COUNT(*) FROM rekyc_cases WHERE status='escalated'") + (int)val("SELECT COUNT(*) FROM beneficiaries WHERE status='pending'");
 ?>

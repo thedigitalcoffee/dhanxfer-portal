@@ -428,3 +428,55 @@ CREATE TABLE IF NOT EXISTS agent_events (
   at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
   INDEX (agent_id)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+
+CREATE TABLE IF NOT EXISTS commission_ledger (
+  id INT UNSIGNED AUTO_INCREMENT PRIMARY KEY,
+  agent_id INT UNSIGNED NOT NULL,
+  entry VARCHAR(10) NOT NULL,
+  amount_cad DECIMAL(14,2) NOT NULL,
+  transfer_id INT UNSIGNED NULL,
+  withdrawal_id INT UNSIGNED NULL,
+  note VARCHAR(120) NULL,
+  created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  UNIQUE KEY one_earn (transfer_id, entry),
+  UNIQUE KEY one_step (withdrawal_id, entry),
+  INDEX (agent_id)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+
+CREATE TABLE IF NOT EXISTS commission_withdrawals (
+  id INT UNSIGNED AUTO_INCREMENT PRIMARY KEY,
+  agent_id INT UNSIGNED NOT NULL,
+  amount_cad DECIMAL(14,2) NOT NULL,
+  status VARCHAR(14) NOT NULL DEFAULT 'requested',
+  note VARCHAR(200) NULL,
+  min_applied DECIMAL(10,2) NULL,
+  requested_by INT UNSIGNED NOT NULL,
+  requested_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  approved_by INT UNSIGNED NULL,
+  approved_at DATETIME NULL,
+  paid_by INT UNSIGNED NULL,
+  paid_at DATETIME NULL,
+  paid_date DATE NULL,
+  paid_reference VARCHAR(60) NULL,
+  paid_method VARCHAR(60) NULL,
+  reconcile_outcome VARCHAR(10) NULL,
+  reconciled_by INT UNSIGNED NULL,
+  reconciled_at DATETIME NULL,
+  updated_at DATETIME NULL,
+  UNIQUE KEY paid_reference (paid_reference),
+  INDEX (agent_id), INDEX (status)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+
+CREATE TABLE IF NOT EXISTS withdrawal_events (
+  id INT UNSIGNED AUTO_INCREMENT PRIMARY KEY,
+  withdrawal_id INT UNSIGNED NOT NULL,
+  from_status VARCHAR(14) NULL,
+  to_status VARCHAR(14) NOT NULL,
+  user_id INT UNSIGNED NULL,
+  reason VARCHAR(500) NULL,
+  data TEXT NULL,
+  at DATETIME NOT NULL,
+  prev_hash CHAR(64) NULL,
+  row_hash CHAR(64) NOT NULL,
+  INDEX (withdrawal_id)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;

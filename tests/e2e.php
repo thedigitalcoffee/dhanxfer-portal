@@ -68,7 +68,8 @@ function fresh_step_wait(): void { usleep((30 - time() % 30) * 1000000 + 200000)
 q('SET SESSION wait_timeout=900, interactive_timeout=900');
 function e2e_cleanup(): void {
     q("DELETE FROM submissions WHERE phone IN ('+1 416 555 7009','+1 416 555 7010')");
-    q("DELETE FROM transfers WHERE ref_no='E2E-T2'"); q("DELETE FROM clients WHERE name IN ('E2E Client One','E2E Client Two')");
+    q("DELETE FROM transfers WHERE ref_no IN ('E2E-T2','E2E-W1')");
+    foreach (array_column(all("SELECT id FROM users WHERE username IN ('test.agent1','test.agent2')"), 'id') as $ta) { q('DELETE FROM withdrawal_events WHERE withdrawal_id IN (SELECT id FROM commission_withdrawals WHERE agent_id=?)', [$ta]); q('DELETE FROM commission_withdrawals WHERE agent_id=?', [$ta]); q('DELETE FROM commission_ledger WHERE agent_id=?', [$ta]); } q("DELETE FROM clients WHERE name IN ('E2E Client One','E2E Client Two')");
     $sa14 = array_column(all("SELECT id FROM users WHERE username IN ('e2e.agentx','e2e.manager')"), 'id');
     if ($sa14) { $in14 = implode(',', array_map('intval', $sa14)); q("DELETE FROM referral_links WHERE agent_id IN ($in14)"); q("DELETE FROM agent_events WHERE agent_id IN ($in14)"); q("DELETE FROM password_resets WHERE user_id IN ($in14)"); q("DELETE FROM submissions WHERE agent_id IN ($in14)"); q("DELETE FROM agent_codes WHERE agent_id IN ($in14)"); }
     q("DELETE FROM users WHERE username IN ('e2e.legacy','e2e.staffx','e2e.v2owner','e2e.agentx','e2e.manager')"); q('DELETE FROM login_attempts');
@@ -593,6 +594,43 @@ $evs14 = array_column(all('SELECT action FROM agent_events WHERE agent_id=? ORDE
 ok(implode(',', $evs14) === 'created,assigned,suspended,reactivated,link_disabled,link_regenerated,limits' && (int)val("SELECT COUNT(*) FROM agent_events WHERE agent_id=? AND (reason IS NULL OR reason='') AND action<>'created'", [$ax['id']]) === 0, 'every restriction is in the control history with its reason');
 $mg->req('/?p=subagents&id=' . $ax['id']); snap('subagents', $mg->body);
 
+// ---- 15. commission wallet and manual withdrawals ----
+require_once __DIR__ . '/../inc/wallet.php';
+q("DELETE FROM commission_ledger WHERE agent_id=?", [$a1['id']]); q("DELETE FROM withdrawal_events WHERE withdrawal_id IN (SELECT id FROM commission_withdrawals WHERE agent_id=?)", [$a1['id']]); q("DELETE FROM commission_withdrawals WHERE agent_id=?", [$a1['id']]);
+q("INSERT INTO transfers (ref_no, client_name, agent_id, send_amount, send_currency, receive_currency, status, transfer_date, commission_per_unit, commission, commission_currency, commission_fx_rate, commission_fx_date, commission_fx_source, commission_cad, commission_locked_at)
+   VALUES ('E2E-W1','E2E Wallet',?,84000,'CAD','INR','completed',CURDATE(),0.5,42000,'INR',60,CURDATE(),'market test',700,NOW())", [$a1['id']]);
+$wag = new Browser(); $wag->login('test.agent1'); $wag->req('/?p=commission');
+ok(str_contains($wag->body, 'CAD 700.00') && str_contains($wag->body, 'Request withdrawal') && str_contains($wag->body, 'CAD 500.00'), "agent's wallet shows the locked CAD earnings and the CAD 500 first minimum");
+// two withdrawal requests for most of the balance sent at the same moment from two sessions: only one may reserve
+$wb1 = new Browser(); $wb1->login('test.agent1'); $wb1->req('/?p=commission'); $wb2 = new Browser(); $wb2->login('test.agent1'); $wb2->req('/?p=commission');
+$mh = curl_multi_init(); $hs = [];
+foreach ([$wb1, $wb2] as $bw) { $ch = curl_init($BASE . '/?p=commission'); curl_setopt_array($ch, [CURLOPT_RETURNTRANSFER => true, CURLOPT_POST => true, CURLOPT_POSTFIELDS => http_build_query(['csrf' => $bw->csrf(), 'act' => 'withdraw', 'amount' => '600', 'note' => '']), CURLOPT_COOKIEFILE => $bw->jar, CURLOPT_COOKIEJAR => $bw->jar, CURLOPT_TIMEOUT => 30]); curl_multi_add_handle($mh, $ch); $hs[] = $ch; }
+do { $st = curl_multi_exec($mh, $run); if ($run) curl_multi_select($mh); } while ($run && $st === CURLM_OK);
+foreach ($hs as $ch) { curl_multi_remove_handle($mh, $ch); curl_close($ch); } curl_multi_close($mh);
+$bal15 = wallet_balance((int)$a1['id']);
+ok((int)val("SELECT COUNT(*) FROM commission_withdrawals WHERE agent_id=?", [$a1['id']]) === 1 && $bal15['reserved'] == 600.0 && $bal15['available'] == 100.0, 'two requests at the same moment: exactly one reserves the money (no over-withdrawal)');
+$w15 = (int)val('SELECT id FROM commission_withdrawals WHERE agent_id=?', [$a1['id']]);
+$wag->post('/?p=withdrawals', ['id' => (string)$w15, 'act' => 'move', 'to' => 'approved', 'reason' => 'Agent approving own']);
+ok(val('SELECT status FROM commission_withdrawals WHERE id=?', [$w15]) === 'requested', 'the sub-agent cannot change the status of their own withdrawal');
+$adw = new Browser(); fresh_step_wait(); $adw->login('test.admin');
+$adw->post('/?p=withdrawals', ['id' => (string)$w15, 'act' => 'move', 'to' => 'under_review', 'reason' => 'E2E checking orders']);
+$adw->post('/?p=withdrawals', ['id' => (string)$w15, 'act' => 'move', 'to' => 'approved', 'reason' => 'E2E orders verified']);
+$adw->post('/?p=withdrawals', ['id' => (string)$w15, 'act' => 'move', 'to' => 'processing', 'reason' => 'E2E admin tries finance step']);
+ok(val('SELECT status FROM commission_withdrawals WHERE id=?', [$w15]) === 'approved', 'admin reviews and approves; processing needs finance');
+q("UPDATE users SET role='super_admin' WHERE username='test.admin'");
+$sw = new Browser(); fresh_step_wait(); $sw->login('test.admin');
+$sw->post('/?p=withdrawals', ['id' => (string)$w15, 'act' => 'move', 'to' => 'processing', 'reason' => 'E2E sent by Interac']);
+$sw->post('/?p=withdrawals', ['id' => (string)$w15, 'act' => 'move', 'to' => 'paid', 'reason' => 'E2E paid', 'payment_date' => date('Y-m-d'), 'reference' => 'E2E-REF-' . $w15]);
+ok(val('SELECT status FROM commission_withdrawals WHERE id=?', [$w15]) === 'processing', 'Paid without the payment confirmation tick is refused');
+$sw->req('/?p=withdrawals&id=' . $w15); snap('withdrawal_admin', $sw->body);
+$sw->post('/?p=withdrawals', ['id' => (string)$w15, 'act' => 'move', 'to' => 'paid', 'reason' => 'E2E paid', 'confirm' => '1', 'payment_date' => date('Y-m-d'), 'reference' => 'E2E-REF-' . $w15, 'method' => 'Interac']);
+$bal15 = wallet_balance((int)$a1['id']);
+ok(val('SELECT status FROM commission_withdrawals WHERE id=?', [$w15]) === 'paid' && $bal15['paid'] == 600.0 && $bal15['reserved'] == 0.0 && wd_verify($w15) === null, 'finance marks it Paid with date and reference; ledger and history agree');
+q("UPDATE users SET role='admin' WHERE username='test.admin'");
+$wag->req('/?p=commission'); snap('agent_wallet', $wag->body);
+ok(str_contains($wag->body, 'E2E-REF-' . $w15) && str_contains($wag->body, 'CAD 100.00') && str_contains($wag->body, 'Minimum: CAD 100.00'), 'the agent sees the payout and the CAD 100 minimum after the first paid withdrawal');
+q("DELETE FROM transfers WHERE ref_no='E2E-W1'");
+
 // ---- 10. phone-size layout snapshots (synthetic staging data) ----
 $m1 = new Browser(); $m1->login('test.agent1');
 foreach (['agent_home' => '/', 'agent_clients' => '/?p=clients', 'agent_new_client' => '/?p=client_form', 'agent_rates' => '/?p=rates', 'agent_transfers' => '/?p=transfers', 'agent_commission' => '/?p=commission', 'agent_transfer_new' => '/?p=transfer_form'] as $k => $pth) { $m1->req($pth); snap($k, $m1->body); }
@@ -607,7 +645,7 @@ foreach ($SNAP as $k => $h) {
 }
 @file_put_contents(data_dir() . '/snapshots.txt', $bundle);
 $lite = '';
-foreach (['beneficiary', 'otp', 'register_new', 'subagents'] as $k) {
+foreach (['beneficiary', 'otp', 'register_new', 'subagents', 'agent_wallet', 'withdrawal_admin'] as $k) {
     if (!isset($SNAP[$k])) continue;
     $h = preg_replace('/name="csrf" value="[a-f0-9]+"/', 'name="csrf" value="x"', $SNAP[$k]);
     $h = preg_replace('#<head>.*?</head>#s', '<!--HEAD-->', $h);
